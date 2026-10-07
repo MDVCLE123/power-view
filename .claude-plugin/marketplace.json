@@ -1,0 +1,16 @@
+{
+  "name": "marcs-mods",
+  "owner": {
+    "name": "Marc Visocky"
+  },
+  "metadata": {
+    "description": "Marc's Claude Code mods"
+  },
+  "plugins": [
+    {
+      "name": "power-view",
+      "source": "./plugins/power-view",
+      "description": "Power View: a live steps box with hidden tool calls in the Progress Only style, plus the Tools tray for model, effort, styles and helper agents, an Agents pane for subagents and chats with other agent CLIs, and a files pane with an editor"
+    }
+  ]
+}

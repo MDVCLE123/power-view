@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""power-view's status line for Claude Code: model, effort, context and 5-hour use.
+
+Claude Code runs it as the statusLine command (the Tools tray's Status line
+row sets that up) and hands it the session as JSON on stdin.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+SETTINGS = os.path.expanduser("~/.claude/settings.json")
+ORCA_STATUSLINE = os.path.expanduser("~/.orca/agent-hooks/claude-statusline.sh")
+
+# (label, value for "model", key under "modelSettings"), as the Tools tray offers them
+MODELS = [
+    ("Haiku 4.5", "haiku", "claude-haiku-4-5"),
+    ("Sonnet 5.5", "sonnet", "claude-sonnet-5-5"),
+    ("Opus 5.5", "opus[1m]", "claude-opus-5-5"),
+    ("Fable 5.1", "fable", "claude-fable-5-1"),
+]
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+
+
+def load():
+    try:
+        with open(SETTINGS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def dig(d, *path):
+    for p in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(p)
+    return d
+
+
+def model_index(d):
+    m = (d.get("model") or "").lower()
+    for i, (_, val, key) in enumerate(MODELS):
+        if m == val or m.split("[")[0] in (val.split("[")[0], key):
+            return i
+    return None
+
+
+def main():
+    raw = sys.stdin.read()
+    # Keep Orca's status reporting working when Claude runs inside Orca.
+    if raw and (os.environ.get("ORCA_AGENT_HOOK_PORT") or os.environ.get("ORCA_AGENT_HOOK_ENDPOINT")):
+        if os.access(ORCA_STATUSLINE, os.X_OK):
+            p = subprocess.Popen(["/bin/sh", ORCA_STATUSLINE], stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p.stdin.write(raw.encode())
+            p.stdin.close()
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    d = load()
+
+    RESET, DIM, BOLD = "\033[0m", "\033[38;5;245m", "\033[1m"
+    ORANGE, PURPLE, GREEN = "\033[38;5;208m", "\033[38;5;141m", "\033[38;5;35m"
+    sep = f" {DIM}│{RESET} "
+    parts = []
+
+    model_id = str(dig(data, "model", "id") or d.get("model") or "")
+    mi = model_index(d)
+    name = dig(data, "model", "display_name") or (MODELS[mi][0] if mi is not None else d.get("model") or "Default")
+    name = re.sub(r"\s*\(1M context\)", "", str(name))
+    big = "[1m]" in model_id or "1M" in str(dig(data, "model", "display_name") or "")
+    parts.append(f"{ORANGE}◆{RESET} {BOLD}{name}{RESET}" + (f" {DIM}·{RESET} {PURPLE}1M{RESET}" if big else ""))
+
+    effort = dig(data, "effort", "level") or (data.get("effort") if isinstance(data.get("effort"), str) else None)
+    if not effort:
+        key = re.sub(r"\[.*\]$", "", model_id)
+        effort = dig(d, "modelSettings", key, "effortLevel") if key.startswith("claude-") else None
+        if not effort:
+            level = dig(d, "modelSettings", MODELS[2 if mi is None else mi][2], "effortLevel")
+            effort = level if level in EFFORTS else None
+    if effort:
+        parts.append(f"{DIM}effort{RESET} {ORANGE}{effort}{RESET}")
+
+    ctx = dig(data, "context_window", "used_percentage")
+    if isinstance(ctx, (int, float)):
+        filled = max(0, min(10, round(ctx / 10)))
+        parts.append(f"{DIM}ctx{RESET} {GREEN}{'▰' * filled}{DIM}{'▱' * (10 - filled)}{RESET} {int(round(ctx))}%")
+
+    five = dig(data, "rate_limits", "five_hour", "used_percentage")
+    if isinstance(five, (int, float)):
+        parts.append(f"{DIM}5h{RESET} {int(round(five))}%")
+
+    style = str(dig(data, "output_style", "name") or "").split(":", 1)[-1]
+    if style and style != "default":
+        parts.append(f"{GREEN}{style}{RESET}")
+
+    print(sep.join(parts))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

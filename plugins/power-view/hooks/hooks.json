@@ -1,0 +1,4 @@
+{
+  "description": "Power View: the live steps box for the Progress Only style, and the Tools tray",
+  "modules": ["./register.tsx"]
+}
