@@ -22,7 +22,7 @@
 // The Agents pane's Agent CLI tab: chats with other agent CLIs on the device
 // (clis.ts), each message a headless run that resumes the CLI's own session.
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
+import type { AgentInfo, CommandInfo, CommandSource, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
 
 import type { AgentCli, AgentRow, ChatMessage, CliChat, FileItem, FilePreview, Run, SessionPeek, SessionRow, Step, StepStatus } from '../types'
 import { appleScriptString, CLI_SPECS, handoffText, inFamilies, MODE_HINTS, MODE_LABELS, parseCursorLine, parseModelList, promptWithHistory, shellLine } from './clis'
@@ -510,6 +510,35 @@ async function readTrayState($: EngineInterface) {
     styles: await listStyles($, d),
     helperChoices: TRAY_HELPERS,
     statusLine: isOurStatusLine(d),
+    commands: await listCommands($),
+  }
+}
+
+// The tray's COMMANDS section: every slash command, by where it comes from
+const COMMAND_GROUPS: { source: CommandSource; label: string }[] = [
+  { source: 'builtin', label: 'Built-in' },
+  { source: 'plugin', label: 'Plugins & skills' },
+  { source: 'user', label: 'Yours' },
+  { source: 'mcp', label: 'MCP' },
+]
+
+async function listCommands($: EngineInterface): Promise<CommandInfo[]> {
+  try {
+    return await $.command.list()
+  } catch {
+    return []
+  }
+}
+
+// Closes the tray so the command's own output and pickers have the room, then runs it
+async function runTrayCommand($: EngineInterface, name: string) {
+  await $.ui.close({ id: PANE }).catch(() => {})
+  isTrayOpen = false
+  $.ui.invalidate('ui.render')
+  try {
+    await $.command.run({ command: name, args: '' })
+  } catch (err: any) {
+    $.ui.toast(`/${name}: ${err.message}`)
   }
 }
 
@@ -2582,6 +2611,37 @@ export const register: Register = on => {
 
     const helper = st.helperChoices.find((c: any) => c.value === st.helpers) || st.helperChoices[0]
 
+    // COMMANDS: one button per slash command, grouped by source, the name padded to one column
+    const commandRows = () => {
+      const commands: CommandInfo[] = st.commands ?? []
+      if (commands.length === 0) return []
+      const nameWidth = Math.min(24, Math.max(...commands.map(c => c.name.length)) + 2)
+      const rows: any[] = [Text({ children: [' '] }), section('COMMANDS')]
+      for (const group of COMMAND_GROUPS) {
+        const inGroup = commands.filter(c => c.source === group.source)
+        if (inGroup.length === 0) continue
+        rows.push(Text({ dimColor: true, bold: true, children: [group.label] }))
+        for (const c of inGroup) {
+          rows.push(
+            Box({
+              key: 'cmd-row-' + c.name,
+              flexDirection: 'row',
+              columnGap: 1,
+              children: [
+                Box({
+                  width: nameWidth,
+                  flexShrink: 0,
+                  children: [Button({ key: 'cmd-' + c.name, label: '/' + c.name, plain: true, onPress: () => void runTrayCommand($, c.name) })],
+                }),
+                Box({ flexGrow: 1, flexShrink: 1, children: [Text({ dimColor: true, wrap: 'truncate-end', children: [c.description] })] }),
+              ],
+            }),
+          )
+        }
+      }
+      return rows
+    }
+
     return Box({
       flexDirection: 'column',
       paddingX: 1,
@@ -2633,6 +2693,7 @@ export const register: Register = on => {
         }),
         Text({ children: [' '] }),
         Text({ dimColor: true, children: ['Tab/↑↓ move · Enter select · Esc close · styles & helpers apply to new sessions'] }),
+        ...commandRows(),
       ],
     })
   })

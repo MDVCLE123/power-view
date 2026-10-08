@@ -61,7 +61,7 @@ async function setup($: any, on: any, settingsText: string = JSON.stringify(STAR
     return Box({ children: [] })
   })
   on('session.start', () => ({ cwd: '/tmp' }))
-  on('ui.close', () => ({}))
+  on('ui.close', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
   on('agent.list', () => ({ value: [] }))
@@ -162,4 +162,32 @@ test('the Agent pane row opens the pane and turns auto-open off', async ($, on) 
     props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 80, scroll: {}, view: {} } as any,
   })
   expect(JSON.stringify(await band.drawn())).toContain('◆ Tools')
+})
+
+test('the COMMANDS section lists every slash command and runs the one pressed', async ($, on) => {
+  const ran: string[] = []
+  on('command.list', () => ({
+    value: [
+      { name: 'compact', description: 'Clear history but keep a summary', source: 'builtin' },
+      { name: 'tray', description: 'Open Tools', source: 'plugin', plugin: 'power-view' },
+      { name: 'deploy', description: 'Ship it', source: 'user' },
+    ],
+  }))
+  on('command.run', { command: 'compact' }, ($: any, e: any) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  await setup($, on)
+  const pane = await mountTray($)
+  const tree = JSON.stringify(await pane.drawn())
+  expect(tree).toContain('C O M M A N D S')
+  expect(tree).toContain('Built-in')
+  expect(tree).toContain('/compact')
+  expect(tree).toContain('Plugins & skills')
+  expect(tree).toContain('/tray')
+  expect(tree).toContain('/deploy')
+  expect(tree).not.toContain('MCP')
+
+  await pane.press({ key: 'cmd-compact' })
+  expect(ran).toEqual(['compact'])
 })

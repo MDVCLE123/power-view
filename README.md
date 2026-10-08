@@ -5,7 +5,7 @@ Marc's Claude Code mods, as a plugin marketplace.
 ## power-view
 
 - **Steps box:** the Progress Only output style, with a live steps box and hidden tool calls.
-- **◆ Tools** (`/tray`): model, effort, output style, helper agents and the status line.
+- **◆ Tools** (`/tray`): model, effort, output style, helper agents, the status line, and every slash command, grouped by source and run with a press.
 - **● Agents** (`/agentpane`), two tabs:
   - **Subagents:** Claude's subagents with their current tool, tokens and a Stop button.
   - **Agent CLI** (`/agentcli`): chat with other agent CLIs on the device (Cursor Agent, Codex, …), with a model picker and hand-off to Claude.
