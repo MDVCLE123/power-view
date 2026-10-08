@@ -22,11 +22,12 @@
 // The Agents pane's Agent CLI tab: chats with other agent CLIs on the device
 // (clis.ts), each message a headless run that resumes the CLI's own session.
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, EngineInterface, Register, RenderInput } from 'claude-code'
+import type { AgentInfo, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
 
-import type { AgentCli, AgentRow, ChatMessage, CliChat, FileItem, FilePreview, Run, Step, StepStatus } from '../types'
+import type { AgentCli, AgentRow, ChatMessage, CliChat, FileItem, FilePreview, Run, SessionPeek, SessionRow, Step, StepStatus } from '../types'
 import { appleScriptString, CLI_SPECS, handoffText, inFamilies, MODE_HINTS, MODE_LABELS, parseCursorLine, parseModelList, promptWithHistory, shellLine } from './clis'
 import type { CliMode, CliSpec } from './clis'
+import { ago, clip, EARLIER_SHOWN, groupOf, mergeSessions, parseBackgroundedId, parseLive, parsePeek, parseRecent, RECENT_COUNT, RECENT_EVERY_TICKS, RECENT_SCRIPT, rowDetail, rowDir, SESSION_GLYPH, SESSION_GROUPS, SESSIONS_PANE, SESSIONS_POLL_MS, SESSIONS_PURPLE, shortDir } from './sessions'
 import { describeCall, firstLine, formatElapsed, formatSize, markOf, parseGitStatus, truncate } from './format'
 
 const run = atom({ plugin: 'power-view', key: 'run' } as const, null)
@@ -1884,13 +1885,420 @@ async function drawCli($: EngineInterface, e: RenderInput<'Pane'>) {
   )
 }
 
+
+// The Sessions pane (/sessions, or the ☰ Sessions button): every Claude
+// session in one list, to start a new one or jump to another. Live sessions
+// come from `claude agents --json --all`, earlier conversations from the
+// transcripts under ~/.claude/projects (sessions.ts reads both), so a session
+// closed yesterday is still a row, named by its title and with its last prompt
+// under it. Resume here picks a closed or finished conversation up in this
+// terminal (moving Claude to its folder first with /cd); a background session
+// still running attaches in a new terminal tab; Resume in bg revives a closed
+// one under agent view.
+
+const sessions = atom({ plugin: 'power-view', key: 'sessions' } as const, [])
+const sessionsView = atom({ plugin: 'power-view', key: 'sessionsView' } as const, {
+  selected: null,
+  peek: null,
+  dir: '',
+  note: '',
+  confirmDelete: null,
+  nonce: 0,
+  isAllEarlier: false,
+})
+
+let isSessionsOpen = false
+let sessionsHome = ''
+let selfSessionId = ''
+let ticks = 0
+let needsInput = 0
+let recent: SessionRow[] = []
+let live: SessionRow[] = []
+
+const saySessions = ($: EngineInterface, note: string) => update($, sessionsView, v => ({ ...v, note }))
+
+// Runs a button's work, showing a failure in the pane instead of losing it
+function actSessions($: EngineInterface, work: () => Promise<unknown>) {
+  void work().catch((err: unknown) => saySessions($, 'Failed: ' + String(err).slice(0, 300)))
+}
+
+const runClaude = ($: EngineInterface, args: string[], cwd?: string) => $.process.run(['claude', ...args], { cwd, timeoutMs: 30_000 })
+
+async function refreshLive($: EngineInterface) {
+  const ran = await runClaude($, ['agents', '--json', '--all'])
+  if (ran.exitCode !== 0) return saySessions($, 'claude agents failed: ' + ran.stderr.trim().slice(0, 200))
+  live = parseLive(ran.stdout, sessionsHome)
+  const waiting = live.filter(s => groupOf(s) === 'Needs input' && s.sessionId !== selfSessionId).length
+  if (waiting !== needsInput) {
+    needsInput = waiting
+    $.ui.invalidate('ui.render')
+  }
+  await update($, sessions, () => mergeSessions(live, recent))
+}
+
+async function refreshRecent($: EngineInterface) {
+  if (!sessionsHome) return
+  const ran = await $.process.run(['python3', '-c', RECENT_SCRIPT, sessionsHome, String(RECENT_COUNT)], { timeoutMs: 30_000 })
+  if (ran.exitCode !== 0) return saySessions($, "Couldn't list earlier sessions: " + ran.stderr.trim().slice(-200))
+  recent = parseRecent(ran.stdout)
+  await update($, sessions, () => mergeSessions(live, recent))
+}
+
+async function refreshAll($: EngineInterface) {
+  await refreshLive($)
+  await refreshRecent($)
+  const v = await read($, sessionsView)
+  const list = await read($, sessions)
+  if (v.selected && !list.some(s => s.key === v.selected)) await update($, sessionsView, x => ({ ...x, selected: null, peek: null }))
+}
+
+async function findSession($: EngineInterface, key: string | null) {
+  return (await read($, sessions)).find(s => s.key === key)
+}
+
+async function selectedSession($: EngineInterface) {
+  return findSession($, (await read($, sessionsView)).selected)
+}
+
+async function loadPeek($: EngineInterface, s: SessionRow) {
+  const ran = await $.process.run(['tail', '-n', '400', s.path])
+  const peek: SessionPeek = ran.exitCode === 0 ? parsePeek(s.key, ran.stdout) : { key: s.key, prompt: null, reply: null, error: 'No transcript yet.' }
+  await update($, sessionsView, v => ({ ...v, peek }))
+}
+
+async function selectSession($: EngineInterface, s: SessionRow) {
+  await update($, sessionsView, v => ({ ...v, selected: s.key, confirmDelete: null, note: '' }))
+  await loadPeek($, s)
+  // The picked session's buttons sit under the list, often below the fold
+  await $.ui.scroll({ to: { key: 'session-actions' }, in: SESSIONS_PANE }).catch(() => {})
+}
+
+// Opens a new tab in iTerm (a window in Terminal) running a shell line
+async function inNewTab($: EngineInterface, line: string) {
+  const hasITerm = await $.fs.exists('/Applications/iTerm.app').catch(() => false)
+  const script = hasITerm
+    ? [
+        'tell application "iTerm"',
+        'activate',
+        'if (count of windows) = 0 then',
+        'create window with default profile',
+        'else',
+        'tell current window to create tab with default profile',
+        'end if',
+        `tell current session of current window to write text ${appleScriptString(line)}`,
+        'end tell',
+      ]
+    : ['tell application "Terminal"', 'activate', `do script ${appleScriptString(line)}`, 'end tell']
+  const ran = await $.process.run(['osascript', ...script.flatMap(l => ['-e', l])])
+  if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || 'osascript failed')
+}
+
+// The shell line that picks a session up in a terminal of its own
+function resumeLine(s: SessionRow) {
+  return s.kind === 'background' && s.id ? shellLine(s.cwd, ['claude', 'attach', s.id]) : shellLine(s.cwd, ['claude', '--resume', s.sessionId])
+}
+
+// A closed conversation, or a background one that finished, can take this
+// terminal's place; a running one belongs to its own process
+const canResumeHere = (s: SessionRow) => s.sessionId !== selfSessionId && (s.kind === 'past' || (s.kind === 'background' && groupOf(s) === 'Done'))
+
+async function openSession($: EngineInterface) {
+  const s = await selectedSession($)
+  if (!s) return saySessions($, 'Pick a session first.')
+  if (s.sessionId === selfSessionId) return saySessions($, 'That is this session.')
+  if (s.kind === 'interactive') return saySessions($, `"${s.name}" is open in another terminal: switch to that window.`)
+  if (canResumeHere(s)) return resumeHere($, s)
+  await inNewTab($, resumeLine(s))
+  return saySessions($, `"${s.name}" is still running, so it opened in a new terminal tab.`)
+}
+
+// /resume in this terminal; a conversation from another folder moves Claude
+// there first, since /resume finds conversations by folder
+async function resumeHere($: EngineInterface, s: SessionRow) {
+  if (s.cwd && s.cwd !== (await $.session.cwd())) {
+    await saySessions($, `Moving to ${shortDir(s.cwd, sessionsHome)}…`)
+    try {
+      await $.command.run({ command: 'cd', args: s.cwd })
+    } catch {}
+    if ((await $.session.cwd()) !== s.cwd) {
+      await inNewTab($, resumeLine(s))
+      return saySessions($, `Couldn't move here to ${shortDir(s.cwd, sessionsHome)}, so "${s.name}" opened in a new terminal tab.`)
+    }
+  }
+  await saySessions($, `Resuming "${s.name}" here…`)
+  await $.command.run({ command: 'resume', args: s.sessionId })
+}
+
+async function openInTab($: EngineInterface) {
+  const s = await selectedSession($)
+  if (!s) return saySessions($, 'Pick a session first.')
+  if (s.kind === 'interactive') return saySessions($, `"${s.name}" is open in another terminal: switch to that window.`)
+  await inNewTab($, resumeLine(s))
+  return saySessions($, `Opened "${s.name}" in a new terminal tab.`)
+}
+
+// Brings an earlier or finished conversation back as a background session, listed in agent view
+async function resumeInBackground($: EngineInterface) {
+  const s = await selectedSession($)
+  if (!s) return saySessions($, 'Pick a session first.')
+  if (s.kind !== 'past' && groupOf(s) !== 'Done') return saySessions($, `"${s.name}" is already running.`)
+  await saySessions($, `Reviving "${s.name}"…`)
+  const ran = await runClaude($, ['--bg', '--resume', s.sessionId], s.cwd || undefined)
+  if (ran.exitCode !== 0) return saySessions($, (ran.stderr || ran.stdout).trim().slice(0, 300) || 'claude --bg --resume failed')
+  await refreshLive($)
+  await saySessions($, `"${s.name}" is running in the background again (agent view lists it).`)
+}
+
+async function startSession($: EngineInterface, task: string) {
+  const text = task.trim()
+  if (!text) return
+  const cwd = (await read($, sessionsView)).dir || (await $.session.cwd())
+  await saySessions($, `Starting in ${shortDir(cwd, sessionsHome)}…`)
+  const ran = await runClaude($, ['--bg', text], cwd)
+  if (ran.exitCode !== 0) return saySessions($, (ran.stderr || ran.stdout).trim().slice(0, 300) || 'claude --bg failed')
+  await update($, sessionsView, v => ({ ...v, nonce: v.nonce + 1 }))
+  await refreshLive($)
+  const id = parseBackgroundedId(ran.stdout)
+  const made = id ? (await read($, sessions)).find(s => s.id === id) : undefined
+  if (made) await selectSession($, made)
+  await saySessions($, `Started ${id ?? 'a new session'}. Press o to open it.`)
+}
+
+async function stopSession($: EngineInterface) {
+  const s = await selectedSession($)
+  if (!s?.id || s.kind !== 'background') return saySessions($, 'Only background sessions can be stopped here.')
+  const ran = await runClaude($, ['stop', s.id])
+  await saySessions($, ran.exitCode === 0 ? `Stopped "${s.name}". Its conversation is kept.` : ran.stderr.trim().slice(0, 300))
+  await refreshLive($)
+}
+
+async function deleteSession($: EngineInterface) {
+  const s = await selectedSession($)
+  if (!s?.id || s.kind !== 'background') return saySessions($, 'Only background sessions can be deleted here.')
+  if (s.sessionId === selfSessionId) return saySessions($, 'Not deleting this session.')
+  if ((await read($, sessionsView)).confirmDelete !== s.key) {
+    await update($, sessionsView, v => ({ ...v, confirmDelete: s.key }))
+    return saySessions($, `Press x again to delete "${s.name}".`)
+  }
+  await update($, sessionsView, v => ({ ...v, confirmDelete: null }))
+  const ran = await runClaude($, ['rm', s.id])
+  await saySessions($, ran.exitCode === 0 ? `Deleted "${s.name}".` : ran.stderr.trim().slice(0, 300))
+  await refreshAll($)
+}
+
+async function copyCommand($: EngineInterface, surface: RenderSurface) {
+  const s = await selectedSession($)
+  if (!s) return saySessions($, 'Pick a session first.')
+  const line = resumeLine(s)
+  const copied = await $.ui.copy({ text: line, surface })
+  await saySessions($, copied.isCopied ? 'Copied: ' + line : 'Run: ' + line)
+}
+
+function sessionsButtonLabel() {
+  return ' ☰ Sessions' + (needsInput > 0 ? ' ' + needsInput + '!' : '') + (isSessionsOpen ? ' ▴ ' : ' ▾ ')
+}
+
+async function openSessionsPane($: EngineInterface) {
+  isSessionsOpen = true
+  $.ui.invalidate('ui.render')
+  await $.ui.open({ id: SESSIONS_PANE, title: 'Sessions', columns: 56, focus: true })
+  await refreshAll($)
+}
+
+async function toggleSessionsPane($: EngineInterface) {
+  if (isSessionsOpen) {
+    isSessionsOpen = false
+    await $.ui.close({ id: SESSIONS_PANE })
+    $.ui.invalidate('ui.render')
+  } else {
+    await openSessionsPane($)
+  }
+}
+
+// Called from the mod's one ui.close hook
+function noteSessionsClosed(id: string) {
+  if (id === SESSIONS_PANE) isSessionsOpen = false
+}
+
+// Run from the mod's one session.start hook
+async function startSessions($: EngineInterface) {
+  try {
+    await $.command.register({ name: 'sessions', description: 'Open the Sessions pane: start, switch and resume sessions', immediate: true })
+  } catch (err: any) {
+    $.ui.log('could not add /sessions: ' + err.message)
+  }
+  try {
+    const panes = await $.ui.panes()
+    isSessionsOpen = panes.some(p => p.id === SESSIONS_PANE)
+  } catch {}
+  sessionsHome = await home($)
+  selfSessionId = await $.session.id()
+  const cwd = await $.session.cwd()
+  await update($, sessionsView, v => ({ ...v, dir: v.dir || cwd }))
+  if (isSessionsOpen) void refreshAll($).catch(() => {})
+  else void refreshLive($).catch(() => {})
+  $.clock.every(SESSIONS_POLL_MS, () => {
+    ticks += 1
+    if (!isSessionsOpen && ticks % 5 !== 0) return
+    void (async () => {
+      await refreshLive($)
+      if (!isSessionsOpen) return
+      if (ticks % RECENT_EVERY_TICKS === 0) await refreshRecent($)
+      const s = await selectedSession($)
+      if (s && s.kind !== 'past' && groupOf(s) !== 'Done') await loadPeek($, s)
+    })().catch(() => {})
+  })
+}
+
+function registerSessions(on: Parameters<Register>[0]) {
+  on('command.run', { command: 'sessions' }, async $ => {
+    await openSessionsPane($)
+    return {}
+  })
+
+  on('ui.render', { component: 'Pane', requestId: SESSIONS_PANE }, async ($, e) => {
+    if (e.surface === 'mobile') {
+      const { Text } = $.ui.resolve(e)
+      return <Text dimColor>The Sessions pane needs the terminal or the desktop app.</Text>
+    }
+    const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
+    const list = await read($, sessions)
+    const v = await read($, sessionsView)
+    const cols = Math.max(30, (e.props.bodyColumns || 56) - 2)
+    const nowMs = await $.clock.now()
+    const current = list.find(s => s.key === v.selected)
+    const dirs = [...new Set([v.dir, ...list.map(s => s.cwd)].filter(Boolean))].slice(0, 12)
+    let n = 0
+
+    return (
+      <Box flexDirection="column">
+        <Text bold>New session</Text>
+        {dirs.length > 0 && (
+          <Select
+            key="dir"
+            label="in "
+            value={v.dir || dirs[0]}
+            options={dirs.map(d => ({ value: d, label: shortDir(d, sessionsHome) }))}
+            onSelect={(value: string) => actSessions($, () => update($, sessionsView, x => ({ ...x, dir: value })))}
+          />
+        )}
+        <Input
+          key={`task-${v.nonce}`}
+          placeholder="describe a task for a new session"
+          submitLabel="start"
+          onSubmit={(value: string) => actSessions($, () => startSession($, value))}
+        />
+        {SESSION_GROUPS.map(group => {
+          const all = list.filter(s => groupOf(s) === group)
+          if (all.length === 0) return null
+          // Earlier stays short unless asked, keeping a picked row showing
+          const cut = group === 'Earlier' && !v.isAllEarlier ? Math.max(EARLIER_SHOWN, all.findIndex(s => s.key === v.selected) + 1) : all.length
+          const rows = all.slice(0, cut)
+          return (
+            <Box key={`group-${group}`} flexDirection="column" marginTop={1}>
+              <Text dimColor>{group}</Text>
+              {rows.map(s => {
+                n += 1
+                const mark = s.key === v.selected ? '›' : ' '
+                const tag = s.sessionId === selfSessionId ? ' (this)' : ''
+                const when = ago(s.updatedAt, nowMs)
+                const where = rowDir(s.cwd, sessionsHome)
+                const head = `${mark} ${SESSION_GLYPH[group]} ${s.name}${tag}`
+                const tail = ` · ${where} · ${when}`
+                const room = Math.max(8, cols - tail.length)
+                const shown = head.length > room ? head.slice(0, room - 1) + '…' : head
+                const detail = rowDetail(s, list)
+                return (
+                  <Box key={`row-${s.key}`} flexDirection="column">
+                    <Button key={`s-${s.key}`} plain hotkey={n <= 9 ? String(n) : undefined} onPress={() => actSessions($, () => selectSession($, s))}>
+                      {shown + tail}
+                    </Button>
+                    {detail !== '' && (
+                      <Text dimColor wrap="truncate-end">
+                        {'    ' + detail}
+                      </Text>
+                    )}
+                  </Box>
+                )
+              })}
+              {all.length > EARLIER_SHOWN && group === 'Earlier' && (
+                <Button key="more-earlier" plain dimColor hotkey="m" onPress={() => actSessions($, () => update($, sessionsView, x => ({ ...x, isAllEarlier: !x.isAllEarlier })))}>
+                  {v.isAllEarlier ? '  m show fewer' : `  m show ${all.length - rows.length} more`}
+                </Button>
+              )}
+            </Box>
+          )
+        })}
+        {list.length === 0 && <Text dimColor>Looking for sessions…</Text>}
+        {current && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold wrap="truncate-end">
+              {current.name}
+            </Text>
+            <Text dimColor wrap="truncate-end">
+              {`${current.kind === 'past' ? 'earlier' : current.kind} · ${current.state ?? current.status ?? 'closed'} · ${current.id ?? current.sessionId.slice(0, 8)}`}
+            </Text>
+            <Box key="session-actions" flexDirection="row" columnGap={1} flexWrap="wrap">
+              <Button key="open" hotkey="o" variant="primary" onPress={() => actSessions($, () => openSession($))}>
+                {canResumeHere(current) ? 'Resume here' : 'Open'}
+              </Button>
+              <Button key="tab" hotkey="t" onPress={() => actSessions($, () => openInTab($))}>
+                New tab
+              </Button>
+              {(current.kind === 'past' || groupOf(current) === 'Done') && (
+                <Button key="revive" hotkey="b" onPress={() => actSessions($, () => resumeInBackground($))}>
+                  Resume in bg
+                </Button>
+              )}
+              {current.kind === 'background' && groupOf(current) !== 'Done' && (
+                <Button key="stop" hotkey="s" onPress={() => actSessions($, () => stopSession($))}>
+                  Stop
+                </Button>
+              )}
+              {current.kind === 'background' && (
+                <Button key="delete" hotkey="x" onPress={() => actSessions($, () => deleteSession($))}>
+                  Delete
+                </Button>
+              )}
+              <Button key="copy" hotkey="c" onPress={press => actSessions($, () => copyCommand($, press.surface))}>
+                Copy cmd
+              </Button>
+            </Box>
+            {v.note && (
+              <Text color="yellow" wrap="wrap">
+                {v.note}
+              </Text>
+            )}
+            <Box flexDirection="column" marginTop={1}>
+              {v.peek?.key === current.key && v.peek.prompt && <Text color="cyan">{'> ' + clip(v.peek.prompt, 3, cols - 2)}</Text>}
+              {v.peek?.key === current.key && v.peek.reply && <Text>{clip(v.peek.reply, 10, cols)}</Text>}
+              {v.peek?.key === current.key && v.peek.error && <Text dimColor>{v.peek.error}</Text>}
+            </Box>
+          </Box>
+        )}
+        {v.note && !current && (
+          <Text color="yellow" wrap="wrap">
+            {v.note}
+          </Text>
+        )}
+        <Button key="refresh" hotkey="r" plain dimColor onPress={() => actSessions($, () => refreshAll($))}>
+          r refresh
+        </Button>
+      </Box>
+    )
+  })
+}
+
 export const register: Register = on => {
+  registerSessions(on)
+
   on('session.start', async ($, e, next) => {
     await startProgress($)
     await startTray($)
     await startAgentPane($)
     await startFiles($)
     await startCliPane($)
+    await startSessions($)
     return next(e)
   })
 
@@ -2038,6 +2446,8 @@ export const register: Register = on => {
 
   on('ui.close', async ($, e, next) => {
     noteAgentPaneClosed(e)
+    noteSessionsClosed(e.id)
+    if (e.id === SESSIONS_PANE) $.ui.invalidate('ui.render')
     if (e.id === AGENT_PANE) $.ui.invalidate('ui.render')
     if (e.id === FILES_PANE) {
       isFilesOpen = false
@@ -2065,6 +2475,17 @@ export const register: Register = on => {
       justifyContent: 'flex-end',
       columnGap: 1,
       children: [
+        Box({
+          backgroundColor: SESSIONS_PURPLE,
+          children: [
+            Button({
+              key: 'open-sessions',
+              label: sessionsButtonLabel(),
+              plain: true,
+              onPress: () => toggleSessionsPane($),
+            }),
+          ],
+        }),
         Box({
           backgroundColor: TRAY_BLUE,
           children: [

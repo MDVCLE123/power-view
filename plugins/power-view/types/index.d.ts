@@ -77,6 +77,44 @@ export type CliPaneView = {
   modelFilter: string
 }
 
+// One session in the Sessions pane: live (background or interactive) from
+// `claude agents`, or an earlier conversation read from its transcript
+export type SessionRow = {
+  key: string
+  // The background session's short id, which attach, stop and rm take
+  id: string | null
+  sessionId: string
+  name: string
+  cwd: string
+  kind: 'interactive' | 'background' | 'past'
+  state: string | null
+  status: string | null
+  // Its transcript
+  path: string
+  // When it started (live) or last changed (earlier)
+  updatedAt: number
+  // The last thing asked, and the gist of the last reply, from the transcript ('' when unknown)
+  lastPrompt: string
+  lastReply: string
+}
+
+// The picked session's last prompt and reply
+export type SessionPeek = { key: string; prompt: string | null; reply: string | null; error: string | null }
+
+export type SessionsView = {
+  selected: string | null
+  peek: SessionPeek | null
+  // The folder a new session starts in
+  dir: string
+  note: string
+  // The session waiting on a second x to delete
+  confirmDelete: string | null
+  // Bumped to clear the new-session field after a start
+  nonce: number
+  // Every earlier conversation listed, not only the newest few
+  isAllEarlier: boolean
+}
+
 // One entry of a folder in the files pane
 export type FileItem = { name: string; isDir: boolean }
 
@@ -119,6 +157,6 @@ export type FilesView = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'power-view': { run: Run | null; now: number; agents: AgentRow[]; agentNow: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; agentsTab: 'subagents' | 'cli'; files: FilesView | null }
+    'power-view': { run: Run | null; now: number; agents: AgentRow[]; agentNow: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; agentsTab: 'subagents' | 'cli'; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView }
   }
 }
