@@ -9,6 +9,12 @@ Marc's Claude Code mods, as a plugin marketplace.
 - **● Agents** (`/agentpane`), two tabs:
   - **Subagents:** Claude's subagents with their current tool, tokens and a Stop button.
   - **Agent CLI** (`/agentcli`): chat with other agent CLIs on the device (Cursor Agent, Codex, …), with a model picker and hand-off to Claude.
+- **◉ Team** (`/team`): your dev team, like a team sidebar in a chat app. Each custom subagent in `~/.claude/agents` (and the project's `.claude/agents`) is a member, listed with its latest message.
+  - Pick a member to chat with them directly. Each message runs `claude -p --agent <member>` in the session's folder and resumes that member's own session, so they remember the conversation.
+  - **Dev team** messages everyone at once through the `/dev-team` skill: the lead brings in who it needs, and the answer shows one message per member. `@member` in the team field goes straight to that member.
+  - **Mode** per thread: Plan (read-only), Edits (can edit files), Auto (edits and runs commands under auto mode).
+  - `/team <member|all> <message>` sends from the main prompt. **Stop**, **↺ New thread**, hand off to Claude, or continue a thread in a terminal.
+  - Threads are kept per project, across sessions.
 - **☰ Sessions** (`/sessions`): every session in one list, grouped Needs input, Working, Idle, Done and Earlier (closed conversations read from `~/.claude/projects`).
   - Type a task to start a new background session in a folder you pick.
   - Each row is named by its conversation's title, with its last prompt dimmed underneath (or how the reply began, where two rows were asked the same). Earlier shows the newest 10; **m** shows the rest.

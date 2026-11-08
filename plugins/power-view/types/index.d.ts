@@ -155,8 +155,53 @@ export type FilesView = {
   preview: FilePreview | null
 }
 
+// One member of the dev team: a custom subagent from ~/.claude/agents or the project's .claude/agents
+export type TeamMember = {
+  // The agent's name, which --agent takes
+  id: string
+  name: string
+  description: string
+  // Its color, as a hex the pane draws
+  color: string
+}
+
+// One entry of a team thread; in the group thread `speaker` names the member who said it (null: the team)
+export type TeamMessage = { role: 'you' | 'agent' | 'tool' | 'error'; text: string; speaker?: string | null }
+
+// A conversation with one member, or with the whole team (id '@team')
+export type TeamThread = {
+  id: string
+  // Claude's own session, which each turn resumes; null until the first turn gives one
+  sessionId: string | null
+  // plan, edits or auto
+  mode: string
+  isRunning: boolean
+  // The tool it runs now, while a turn runs
+  tool: string | null
+  messages: TeamMessage[]
+  tokens: number
+  updatedAt: number
+}
+
+export type TeamView = {
+  // The project the threads belong to; each project has its own
+  cwd: string
+  members: TeamMember[]
+  threads: Record<string, TeamThread>
+  // The open thread; null shows the team list
+  selected: string | null
+  draft: string
+  // How many of the open thread's latest messages are scrolled out of view, below
+  scrollBack: number
+  // The thread waiting on a second press to start over
+  confirmClear: string | null
+  // The /dev-team skill is installed, and where claude is
+  hasSkill: boolean
+  claudePath: string | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'power-view': { run: Run | null; now: number; agents: AgentRow[]; agentNow: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; agentsTab: 'subagents' | 'cli'; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView }
+    'power-view': { run: Run | null; now: number; agents: AgentRow[]; agentNow: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; agentsTab: 'subagents' | 'cli'; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView; team: TeamView }
   }
 }
