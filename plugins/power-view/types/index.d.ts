@@ -198,6 +198,20 @@ export type TeamView = {
   // The /dev-team skill is installed, and where claude is
   hasSkill: boolean
   claudePath: string | null
+  // What the team did lately, newest last, for the activity panel
+  activity: TeamActivity[]
+  // What each member is doing now, by member id, and since when; absent while idle
+  doing: Record<string, { text: string; since: number; thread: string }>
+}
+
+// One line of the activity panel: who did what, in which thread
+export type TeamActivity = {
+  at: number
+  thread: string
+  // The member it was (null: the team, or you when kind is 'you')
+  who: string | null
+  kind: 'you' | 'tool' | 'reply' | 'done' | 'error'
+  text: string
 }
 
 declare module 'claude-code' {

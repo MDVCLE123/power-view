@@ -141,6 +141,8 @@ export type TeamEvent = {
   toolUseId?: string
   agentType?: string
   parentId?: string
+  // Calls that just finished, by id: an Agent call among them means that member is done
+  doneIds?: string[]
   // A piece of its reply
   text?: string
   // The context its latest request sent, plus the answer
@@ -214,6 +216,11 @@ export function parseClaudeLine(line: string): TeamEvent | null {
       }
     }
     return Object.keys(out).length === 0 ? null : out
+  }
+  if (ev.type === 'user' && (typeof ev.parent_tool_use_id !== 'string' || ev.parent_tool_use_id === '')) {
+    const content: any[] = Array.isArray(ev.message?.content) ? ev.message.content : []
+    const doneIds = content.filter(c => c?.type === 'tool_result' && typeof c.tool_use_id === 'string').map(c => c.tool_use_id as string)
+    return doneIds.length > 0 ? { doneIds } : null
   }
   if (ev.type === 'result') {
     const isError = ev.is_error === true || (typeof ev.subtype === 'string' && ev.subtype !== 'success')

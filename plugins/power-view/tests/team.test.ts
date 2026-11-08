@@ -110,6 +110,10 @@ async function setup($: any, on: any, options: { isSlow?: boolean; store?: Recor
     const session = isGroup ? GROUP_SESSION : SESSION
     if (options.isSlow) {
       yield { stream: 'stdout', text: JSON.stringify({ type: 'system', subtype: 'init', session_id: session }) + '\n' }
+      // The group stops while the lead's Agent call has Backend Dev editing
+      if (isGroup) {
+        yield { stream: 'stdout', text: claudeTurn(session, '', { nested: true }).split('\n').slice(1, 3).join('\n') + '\n' }
+      }
       await held
       return { value: { code: null, signal: 'SIGTERM' } }
     }
@@ -124,6 +128,8 @@ async function setup($: any, on: any, options: { isSlow?: boolean; store?: Recor
 }
 
 const PANE_PROPS = { title: 'Team', isFocused: true, bodyColumns: 72, placement: 'dock', scroll: { bodyRows: 50 }, view: {} } as any
+// Docked wide: the team is a sidebar beside the activity
+const WIDE_PROPS = { ...PANE_PROPS, bodyColumns: 112 }
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 160, scroll: {}, view: {} } as any }
 
 function textOf(node: any): string {
@@ -136,9 +142,9 @@ function textOf(node: any): string {
   return node.type === 'Box' && props.flexDirection !== 'row' ? inner + '\n' : inner
 }
 
-async function openPane($: any, args = '') {
+async function openPane($: any, args = '', props = PANE_PROPS) {
   await $.command.run({ command: 'team', args } as any)
-  return $.ui.mount({ plugin: 'power-view', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS } as any)
+  return $.ui.mount({ plugin: 'power-view', surface: 'terminal', component: 'Pane', requestId: PANE, props } as any)
 }
 
 test('the Team button opens a list of the team: the group, the lead, then each member', async ($, on) => {
@@ -353,4 +359,59 @@ test('helpers: Claude stream lines and group replies', () => {
   ])
   // A bold label that names nobody stays in the text
   expect(splitGroupReply('**Note:** nothing to add', members)).toEqual([{ speaker: null, text: '**Note:** nothing to add' }])
+})
+
+test('docked wide, the team is a sidebar on the left and the activity is on the right', async ($, on) => {
+  await setup($, on)
+  const pane = await openPane($, '', WIDE_PROPS)
+  let text = textOf(await pane.drawn())
+  expect(text).toContain('⚡ Activity')
+  expect(text).toContain("W H A T ' S  H A P P E N I N G")
+  expect(text).toContain('Nobody is working.')
+  // The sidebar is the row's first column, the activity its last
+  expect(text.indexOf('D E V  T E A M')).toBeLessThan(text.indexOf('UX/UI Designer'))
+  expect(text.indexOf('UX/UI Designer')).toBeLessThan(text.indexOf('W H A T'))
+  for (const name of ['Dev team', 'Team Lead', 'Backend Dev', 'QA & Security']) expect(text).toContain(name)
+
+  // Picking a member shows their thread on the right, the sidebar staying
+  await pane.press({ key: 'team-open-backend-dev' })
+  text = textOf(await pane.drawn())
+  expect(text).toContain('Start a conversation with Backend Dev.')
+  expect(text).toContain('⚡ Activity')
+  expect(text).not.toContain('‹ Team')
+  await pane.input({ key: 'team-reply', text: 'Rate limits?' })
+
+  // Back on Activity: what happened, newest last, and who is idle
+  await pane.press({ key: 'team-activity' })
+  text = textOf(await pane.drawn())
+  expect(text).toContain('→ Backend Dev: Rate limits?')
+  expect(text).toContain('↳ Read app.py')
+  expect(text).toContain('replied: Use a token bucket.')
+  expect(text.indexOf('→ Backend Dev: Rate limits?')).toBeLessThan(text.indexOf('replied: Use a token bucket.'))
+  expect(text).toContain('idle · now')
+  expect(text).toContain('Nobody is working.')
+})
+
+test('while the Dev team works, the activity shows who is doing what', async ($, on) => {
+  const { release } = await setup($, on, { isSlow: true })
+  const pane = await openPane($, '', WIDE_PROPS)
+  await pane.input({ key: 'team-home-message', text: 'Add a login page' })
+  await pane.press({ key: 'team-activity' })
+  let text = textOf(await pane.drawn())
+  expect(text).toContain('2 working')
+  // The lead asked Backend Dev, who is editing
+  expect(text).toContain('Asking Backend Dev: Build the API')
+  expect(text).toContain('Edit api.py')
+  expect(text).toContain('(Dev team)')
+  expect(text).toContain('In Dev team: Edit api.py')
+  expect(text).toContain('→ Dev team: Add a login page')
+
+  await pane.press({ key: 'team-open-@team' })
+  await pane.press({ key: 'team-stop' })
+  release()
+  await pane.redraw()
+  await pane.press({ key: 'team-activity' })
+  text = textOf(await pane.drawn())
+  expect(text).toContain('Nobody is working.')
+  expect(text).toContain('✗ Stopped.')
 })
