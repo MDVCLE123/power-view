@@ -161,7 +161,7 @@ test('the tray has no Agent pane row, and the band no Agents button', async ($, 
   })
   const labels = JSON.stringify(await band.drawn())
   expect(labels).toContain('◆ Tools')
-  expect(labels).toContain('◉ Team')
+  expect(labels).not.toContain('Team')
   expect(labels).not.toContain('Agents')
 })
 

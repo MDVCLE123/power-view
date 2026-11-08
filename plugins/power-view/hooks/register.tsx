@@ -17,9 +17,6 @@
 //
 // The Agent CLI pane (/agentcli): chats with other agent CLIs on the device
 // (clis.ts), each message a headless run that resumes the CLI's own session.
-//
-// The Team pane (teampane.tsx): your dev team of custom subagents, a thread
-// with each member and one with the whole team.
 import { atom, read, update } from 'claude-code'
 import type { CommandInfo, CommandSource, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
 
@@ -28,7 +25,6 @@ import { appleScriptString, CLI_SPECS, handoffText, inFamilies, MODE_HINTS, MODE
 import type { CliMode, CliSpec } from './clis'
 import { ago, clip, EARLIER_SHOWN, groupOf, mergeSessions, parseBackgroundedId, parseLive, parsePeek, parseRecent, RECENT_COUNT, RECENT_EVERY_TICKS, RECENT_SCRIPT, rowDetail, rowDir, SESSION_GLYPH, SESSION_GROUPS, SESSIONS_PANE, SESSIONS_POLL_MS, SESSIONS_PURPLE, shortDir } from './sessions'
 import { describeCall, firstLine, formatElapsed, formatSize, markOf, parseGitStatus, truncate } from './format'
-import { noteTeamClosed, registerTeam, startTeam, TEAM_PANE, TEAM_TEAL, teamButtonLabel, toggleTeamPane } from './teampane'
 
 const run = atom({ plugin: 'power-view', key: 'run' } as const, null)
 const now = atom({ plugin: 'power-view', key: 'now' } as const, 0)
@@ -2040,7 +2036,6 @@ function registerSessions(on: Parameters<Register>[0]) {
 
 export const register: Register = on => {
   registerSessions(on)
-  registerTeam(on)
 
   on('session.start', async ($, e, next) => {
     await startProgress($)
@@ -2048,7 +2043,6 @@ export const register: Register = on => {
     await startFiles($)
     await startCliPane($)
     await startSessions($)
-    await startTeam($)
     return next(e)
   })
 
@@ -2195,8 +2189,6 @@ export const register: Register = on => {
 
   on('ui.close', async ($, e, next) => {
     noteSessionsClosed(e.id)
-    noteTeamClosed(e.id)
-    if (e.id === TEAM_PANE) $.ui.invalidate('ui.render')
     if (e.id === SESSIONS_PANE) $.ui.invalidate('ui.render')
     if (e.id === FILES_PANE) {
       isFilesOpen = false
@@ -2210,8 +2202,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // Small buttons in the band above the prompt, like status bar buttons: the
-  // Sessions pane, the files pane, the Team pane (with how many threads are
-  // working) and the Tools tray
+  // Sessions pane, the files pane and the Tools tray
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const { Box, Button } = $.ui.resolve(e)
     const theirs = await next(e)
@@ -2240,17 +2231,6 @@ export const register: Register = on => {
               label: isFilesOpen ? ' ▤ Project ▴ ' : ' ▤ Project ▾ ',
               plain: true,
               onPress: () => toggleFilesPane($),
-            }),
-          ],
-        }),
-        Box({
-          backgroundColor: TEAM_TEAL,
-          children: [
-            Button({
-              key: 'open-team',
-              label: teamButtonLabel(),
-              plain: true,
-              onPress: () => toggleTeamPane($),
             }),
           ],
         }),

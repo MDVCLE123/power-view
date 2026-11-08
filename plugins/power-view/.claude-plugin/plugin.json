@@ -1,7 +1,7 @@
 {
   "name": "power-view",
-  "version": "1.15.0",
-  "description": "Power View: the Progress Only style with a live steps box and hidden tool calls, plus the Tools tray for model, effort, styles and helper agents, an Agent CLI pane to chat with other agent CLIs, a Team pane to chat with your dev team of custom subagents one by one or all at once, a files pane with an editor, and a Sessions pane to start, switch and resume sessions",
+  "version": "1.16.0",
+  "description": "Power View: the Progress Only style with a live steps box and hidden tool calls, plus the Tools tray for model, effort, styles and helper agents, an Agent CLI pane to chat with other agent CLIs, a files pane with an editor, and a Sessions pane to start, switch and resume sessions",
   "author": {
     "name": "Marc Visocky"
   },
