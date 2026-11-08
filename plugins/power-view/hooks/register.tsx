@@ -1,4 +1,4 @@
-// Power View, in six parts.
+// Power View, in seven parts.
 //
 // The live steps box: while the Progress Only output style is active, a box
 // under the prompt that started the task redraws as the agent works: the
@@ -17,6 +17,10 @@
 //
 // The Agent CLI pane (/agentcli): chats with other agent CLIs on the device
 // (clis.ts), each message a headless run that resumes the CLI's own session.
+//
+// The Agent team pane (agentteam.tsx, /agentteam): opens when Claude starts
+// agents, shows what each is doing with a box to message it, and closes when
+// they are all done.
 import { atom, read, update } from 'claude-code'
 import type { CommandInfo, CommandSource, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
 
@@ -24,6 +28,7 @@ import type { AgentCli, ChatMessage, CliChat, FileItem, FilePreview, Run, Sessio
 import { appleScriptString, CLI_SPECS, handoffText, inFamilies, MODE_HINTS, MODE_LABELS, parseCursorLine, parseModelList, promptWithHistory, shellLine } from './clis'
 import type { CliMode, CliSpec } from './clis'
 import { ago, clip, EARLIER_SHOWN, groupOf, mergeSessions, parseBackgroundedId, parseLive, parsePeek, parseRecent, RECENT_COUNT, RECENT_EVERY_TICKS, RECENT_SCRIPT, rowDetail, rowDir, SESSION_GLYPH, SESSION_GROUPS, SESSIONS_PANE, SESSIONS_POLL_MS, SESSIONS_PURPLE, shortDir } from './sessions'
+import { noteAgentToolCall, noteAgentTurnEnd, registerAgentTeam, startAgentTeam } from './agentteam'
 import { describeCall, firstLine, formatElapsed, formatSize, markOf, parseGitStatus, truncate } from './format'
 
 const run = atom({ plugin: 'power-view', key: 'run' } as const, null)
@@ -2036,6 +2041,7 @@ function registerSessions(on: Parameters<Register>[0]) {
 
 export const register: Register = on => {
   registerSessions(on)
+  registerAgentTeam(on)
 
   on('session.start', async ($, e, next) => {
     await startProgress($)
@@ -2043,6 +2049,7 @@ export const register: Register = on => {
     await startFiles($)
     await startCliPane($)
     await startSessions($)
+    await startAgentTeam($)
     return next(e)
   })
 
@@ -2076,6 +2083,8 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    // An agent's run ended: the Agent team pane marks it
+    if (e.agentId !== undefined) await noteAgentTurnEnd($, e).catch((err: any) => $.ui.log('agent team: ' + err.message))
     // The turn may have changed files: the files pane reads them again
     if (isFilesOpen) refreshFiles($).catch((err: any) => $.ui.log('files pane: ' + err.message))
     const at = await $.clock.now()
@@ -2094,7 +2103,11 @@ export const register: Register = on => {
 
   // Until the model sends a plan, each tool call it makes shows as a step; a subagent's calls don't
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
+    if (e.agentId !== undefined) {
+      // The Agent team pane shows what the agent is doing
+      await noteAgentToolCall($, e as { tool: string; agentId?: string } & Record<string, unknown>).catch((err: any) => $.ui.log('agent team: ' + err.message))
+      return next(e)
+    }
     if (isActive && !QUIET_TOOLS.has(e.tool)) {
       await addAutoStep($, truncate(describeCall(e as { tool: string } & Record<string, unknown>), 70))
     }

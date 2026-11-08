@@ -139,8 +139,25 @@ export type FilesView = {
   preview: FilePreview | null
 }
 
+// One agent in the Agent team pane: running, finished (done), idle (a
+// teammate between turns), stopped (interrupted) or failed
+export type AgentTeamStatus = 'running' | 'done' | 'idle' | 'stopped' | 'failed'
+
+export type AgentTeamRow = {
+  // Its agent id, which a message is sent to
+  id: string
+  // Its name, or the task's short description
+  label: string
+  type: string
+  status: AgentTeamStatus
+  // Its latest tool call while it runs, the start of its answer once done
+  activity: string
+  // Whether the last message sent to it was delivered
+  note?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'power-view': { run: Run | null; now: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView }
+    'power-view': { run: Run | null; now: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView; agentTeam: AgentTeamRow[]; agentTeamDrafts: Record<string, string>; agentTeamDismissed: boolean }
   }
 }

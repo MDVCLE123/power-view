@@ -12,6 +12,7 @@ Marc's Claude Code mods, as a plugin marketplace.
   - Each row is named by its conversation's title, with its last prompt dimmed underneath (or how the reply began, where two rows were asked the same). Earlier shows the newest 10; **m** shows the rest.
   - Pick a row to peek at its last prompt and reply; **Resume here** picks a closed or finished conversation up in this terminal (moving Claude to its folder first). A background session that's still running opens in a new iTerm tab instead.
   - **Resume in bg** brings a closed conversation back as a background session in agent view; **Stop**, **Delete** and **Copy cmd** too.
+- **Agent team** (`/agentteam`): opens by itself when Claude starts agents (a team of helpers, or a workflow's agents). Each agent shows its status and what it's doing now (its latest tool call), with a box to send it a message. Once every agent is done it closes after a few seconds; close it yourself and it stays closed until that team finishes.
 - **▤ Project** (`/filespane`): a file tree with git marks, find by name or contents, a file viewer and editor, and Open project.
 
 ## Install
