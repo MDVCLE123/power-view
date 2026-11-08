@@ -99,7 +99,6 @@ test('the tray reads ~/.claude/settings.json itself, no ctray needed', async ($,
   expect(tree).toContain('Clean View')
   expect(tree).toContain('Progress Only')
   expect(tree).toContain('Status line')
-  expect(tree).toContain('Agent pane')
 })
 
 test('each change is written to settings.json, other keys kept', async ($, on) => {
@@ -149,19 +148,21 @@ test('settings that do not parse are left alone', async ($, on) => {
   expect(toasts).toEqual([])
 })
 
-test('the Agent pane row opens the pane and turns auto-open off', async ($, on) => {
-  const { opened, toasts } = await setup($, on)
+test('the tray has no Agent pane row, and the band no Agents button', async ($, on) => {
+  await setup($, on)
   const pane = await mountTray($)
-  await pane.press({ key: 'agentpane-open' })
-  expect(opened).toContain('power-view-agents')
-  await pane.press({ key: 'agentpane' })
-  expect(toasts).toContain('Agent pane: only with /agentpane')
+  const tray = JSON.stringify(await pane.drawn())
+  expect(tray).not.toContain('Agent pane')
+  expect(tray).not.toContain('agentpane')
 
   const band = await $.ui.mount({
     plugin: 'power-view', surface: 'terminal', component: 'AbovePrompt',
     props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 80, scroll: {}, view: {} } as any,
   })
-  expect(JSON.stringify(await band.drawn())).toContain('◆ Tools')
+  const labels = JSON.stringify(await band.drawn())
+  expect(labels).toContain('◆ Tools')
+  expect(labels).toContain('◉ Team')
+  expect(labels).not.toContain('Agents')
 })
 
 test('the COMMANDS section lists every slash command and runs the one pressed', async ($, on) => {

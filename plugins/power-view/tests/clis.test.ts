@@ -121,45 +121,18 @@ async function openPane($: any, surface: 'terminal' | 'desktop' = 'terminal') {
   return $.ui.mount({ plugin: 'power-view', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
 }
 
-test('Agent CLI is a tab of the Agents pane, and its own button is gone', async ($, on) => {
+test('/agentcli opens the Agent CLI pane on its own: no Subagents tab, no Agents button', async ($, on) => {
   const { opened } = await setup($, on)
   const band = await $.ui.mount({ plugin: 'power-view', surface: 'terminal', ...BAND })
-  const labels = textOf(await band.drawn())
-  expect(labels).toContain('● Agents ▾')
-  expect(labels).not.toContain('Agent CLI')
-  await band.unmount()
+  expect(textOf(await band.drawn())).not.toContain('Agents')
 
-  // The Agents pane opens on Subagents, with Agent CLI beside it
-  await $.command.run({ command: 'agentpane', args: '' })
-  const pane = await $.ui.mount({ plugin: 'power-view', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
-  let text = textOf(await pane.drawn())
-  expect(text).toContain('● Subagents')
-  expect(text).toContain('⌘ Agent CLI')
-  expect(text).toContain('No subagents yet')
-  expect(text).not.toContain('Cursor Agent')
-
-  await pane.press({ key: 'agents-tab-cli' })
-  text = textOf(await pane.drawn())
+  const pane = await openPane($)
+  const text = textOf(await pane.drawn())
+  expect(opened).toEqual([PANE])
   expect(text).toContain('A G E N T  C L I')
   expect(text).toContain('Cursor Agent')
+  expect(text).not.toContain('Subagents')
   expect(text).not.toContain('No subagents yet')
-
-  await pane.press({ key: 'agents-tab-subagents' })
-  expect(textOf(await pane.drawn())).toContain('No subagents yet')
-
-  // /agentcli opens the same pane on its Agent CLI tab
-  await $.command.run({ command: 'agentcli', args: '' })
-  expect(opened.every(id => id === PANE)).toBe(true)
-  expect(textOf(await pane.drawn())).toContain('A G E N T  C L I')
-})
-
-test('the tab and the Agents button count chats that are working', async ($, on) => {
-  await setup($, on, { isSlow: true })
-  const pane = await openPane($)
-  await pane.input({ key: 'cli-message', text: 'Review the diff' })
-  expect(textOf(await pane.drawn())).toContain('⌘ Agent CLI 1')
-  const band = await $.ui.mount({ plugin: 'power-view', surface: 'terminal', ...BAND })
-  expect(textOf(await band.drawn())).toContain('● Agents 1')
 })
 
 test('a new chat offers only the CLIs on this device', async ($, on) => {

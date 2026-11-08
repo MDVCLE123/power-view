@@ -18,22 +18,6 @@ export type Run = {
   isAuto: boolean
 }
 
-// One subagent in the agent pane
-export type AgentRow = {
-  id: string
-  name: string
-  type: string
-  // The engine's AgentStatus: pending, running, waiting, idle, completed, failed or killed
-  status: string
-  // The last tool call it made, and whether that call is still running
-  tool: string | null
-  isToolRunning: boolean
-  // The context its last model request sent, plus that request's answer
-  tokens: number
-  startedAt: number
-  endedAt: number | null
-}
-
 // A model an agent CLI offers: what its --model takes, and its name
 export type ModelChoice = { value: string; label: string }
 
@@ -216,6 +200,6 @@ export type TeamActivity = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'power-view': { run: Run | null; now: number; agents: AgentRow[]; agentNow: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; agentsTab: 'subagents' | 'cli'; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView; team: TeamView }
+    'power-view': { run: Run | null; now: number; clis: AgentCli[]; cliModels: Record<string, ModelChoice[]>; cliPane: CliPaneView; files: FilesView | null; sessions: SessionRow[]; sessionsView: SessionsView; team: TeamView }
   }
 }

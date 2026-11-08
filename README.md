@@ -6,9 +6,7 @@ Marc's Claude Code mods, as a plugin marketplace.
 
 - **Steps box:** the Progress Only output style, with a live steps box and hidden tool calls.
 - **◆ Tools** (`/tray`): model, effort, output style, helper agents, the status line, and every slash command, grouped by source and run with a press.
-- **● Agents** (`/agentpane`), two tabs:
-  - **Subagents:** Claude's subagents with their current tool, tokens and a Stop button.
-  - **Agent CLI** (`/agentcli`): chat with other agent CLIs on the device (Cursor Agent, Codex, …), with a model picker and hand-off to Claude.
+- **⌘ Agent CLI** (`/agentcli`): chat with other agent CLIs on the device (Cursor Agent, Codex, …), with a model picker and hand-off to Claude.
 - **◉ Team** (`/team`): your dev team, like a team sidebar in a chat app. Each custom subagent in `~/.claude/agents` (and the project's `.claude/agents`) is a member, listed with its latest message.
   - Docked wide, the team is a sidebar on the left, each member with what they're doing now, and the right side shows **⚡ Activity**: who is working on what (with how long), then a feed of what the team did lately. Pick a member and their thread takes the right side. Narrow, the list and a thread take turns.
   - Pick a member to chat with them directly. Each message runs `claude -p --agent <member>` in the session's folder and resumes that member's own session, so they remember the conversation.

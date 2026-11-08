@@ -9,25 +9,21 @@
 // agent makes shows as a step of its own. Tool rows are hidden meanwhile.
 //
 // The Tools tray: a button above the prompt (and /tray) opens a pane for the
-// model, effort, output style, helper agents, the status line and the agent pane.
-//
-// The Agents pane, in two tabs: Subagents, each of Claude's subagents with its
-// current tool call, tokens and a Stop button, the pane opening as they start
-// and folding away when they finish; and Agent CLI, below.
+// model, effort, output style, helper agents and the status line.
 //
 // The files pane: the session's folder as a tree with git's marks, a name or
 // contents filter, and the picked file shown beside the tree (under it when
 // narrow) in a small editor (editor.tsx) that saves back to disk.
 //
-// The Agents pane's Agent CLI tab: chats with other agent CLIs on the device
+// The Agent CLI pane (/agentcli): chats with other agent CLIs on the device
 // (clis.ts), each message a headless run that resumes the CLI's own session.
 //
 // The Team pane (teampane.tsx): your dev team of custom subagents, a thread
 // with each member and one with the whole team.
 import { atom, read, update } from 'claude-code'
-import type { AgentInfo, CommandInfo, CommandSource, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
+import type { CommandInfo, CommandSource, EngineInterface, Register, RenderInput, RenderSurface } from 'claude-code'
 
-import type { AgentCli, AgentRow, ChatMessage, CliChat, FileItem, FilePreview, Run, SessionPeek, SessionRow, Step, StepStatus } from '../types'
+import type { AgentCli, ChatMessage, CliChat, FileItem, FilePreview, Run, SessionPeek, SessionRow, Step, StepStatus } from '../types'
 import { appleScriptString, CLI_SPECS, handoffText, inFamilies, MODE_HINTS, MODE_LABELS, parseCursorLine, parseModelList, promptWithHistory, shellLine } from './clis'
 import type { CliMode, CliSpec } from './clis'
 import { ago, clip, EARLIER_SHOWN, groupOf, mergeSessions, parseBackgroundedId, parseLive, parsePeek, parseRecent, RECENT_COUNT, RECENT_EVERY_TICKS, RECENT_SCRIPT, rowDetail, rowDir, SESSION_GLYPH, SESSION_GROUPS, SESSIONS_PANE, SESSIONS_POLL_MS, SESSIONS_PURPLE, shortDir } from './sessions'
@@ -669,220 +665,24 @@ async function startTray($: EngineInterface) {
   }
 }
 
-// The agent pane: one row per subagent with the tool it is running, its tokens
-// and elapsed time, and a Stop button. It opens as an agent starts (while that
-// is on in Tools; /agentpane opens it any time) and folds away a few seconds
-// after the last one finishes.
+// The Agent CLI pane (/agentcli): chats with other agent CLIs, below. It opens
+// only when asked.
 
 const AGENT_PANE = 'power-view-agents'
-// Wide enough for the Agent CLI tab's chats
+// Wide enough for the chats
 const AGENT_COLUMNS = 72
-const AGENT_STORE_KEY = 'agentpane.auto'
 
-const agents = atom({ plugin: 'power-view', key: 'agents' } as const, [])
-const agentNow = atom({ plugin: 'power-view', key: 'agentNow' } as const, 0)
-// Which of the Agents pane's tabs shows
-const agentsTab = atom({ plugin: 'power-view', key: 'agentsTab' } as const, 'subagents')
-
-const AGENT_COLORS = {
-  title: '#d77757',
-  dot: '#c77dff',
-  working: '#f27a9b',
-  check: '#86d993',
-  failed: '#ef5f5f',
-  stop: '#b4545e',
-}
-
-const LIVE = new Set(['pending', 'running', 'waiting'])
-// How long finished agents stay in view before the pane folds away
-const LINGER_MS = 5000
-// Rows kept, newest last
-const MAX_ROWS = 20
-
-// Whether the pane opens by itself when an agent starts
-let isAuto = true
-let isPaneOpen = false
-// The person closed the pane during this batch of agents; it stays closed until the batch ends
-let isDismissed = false
-// From a spawn until the list shows the agent
-let isExpecting = false
-let liveCount = 0
-// When the last live agent finished; the pane folds LINGER_MS after
-let quietSince: number | null = null
-
-function isAgentPaneAuto() {
-  return isAuto
-}
-
-async function setAgentPaneAuto($: EngineInterface, value: boolean) {
-  isAuto = value
-  await $.store.set(AGENT_STORE_KEY, value)
-  $.ui.toast('Agent pane: ' + (value ? 'opens when agents start' : 'only with /agentpane'))
-  $.ui.invalidate('ui.render')
-}
+const AGENT_COLORS = { failed: '#ef5f5f', stop: '#b4545e' }
 
 async function openAgentPane($: EngineInterface, isFocused = false) {
-  isPaneOpen = true
-  isDismissed = false
-  await $.ui.open({ id: AGENT_PANE, title: 'Agents', columns: AGENT_COLUMNS, ...(isFocused ? { focus: true as const } : {}) })
+  await $.ui.open({ id: AGENT_PANE, title: 'Agent CLI', columns: AGENT_COLUMNS, ...(isFocused ? { focus: true as const } : {}) })
   $.ui.invalidate('ui.render')
-  await sync($)
-}
-
-// The Agents button beside Tools. Closed by hand while agents run, the pane
-// stays closed until they finish.
-async function toggleAgentPane($: EngineInterface) {
-  if (isPaneOpen) {
-    isPaneOpen = false
-    if (liveCount > 0) isDismissed = true
-    await $.ui.close({ id: AGENT_PANE })
-    $.ui.invalidate('ui.render')
-  } else {
-    await openAgentPane($)
-  }
-}
-
-function isLive(status: string) {
-  return LIVE.has(status)
-}
-
-function newRow(id: string, at: number): AgentRow {
-  return { id, name: 'Agent', type: '', status: 'running', tool: null, isToolRunning: false, tokens: 0, startedAt: at, endedAt: null }
-}
-
-// Changes one agent's row, adding it if the list has not shown it yet
-async function setRow($: EngineInterface, id: string, change: (row: AgentRow) => AgentRow) {
-  const at = await $.clock.now()
-  let isNew = false
-  await update($, agents, rows => {
-    const found = rows.some(r => r.id === id)
-    isNew = !found
-    return found ? rows.map(r => (r.id === id ? change(r) : r)) : [...rows, change(newRow(id, at))].slice(-MAX_ROWS)
-  })
-  if (isNew) void sync($)
-}
-
-// Brings the rows up to date with the engine's list of agents
-async function sync($: EngineInterface) {
-  let list: AgentInfo[]
-  try {
-    list = await $.agent.list()
-  } catch {
-    return
-  }
-  const at = await $.clock.now()
-  await update($, agents, rows => {
-    const seen = new Set(list.map(a => a.id))
-    // An agent that dropped off the list has finished
-    const gone = rows
-      .filter(r => !seen.has(r.id))
-      .map(r => (isLive(r.status) ? { ...r, status: 'completed', isToolRunning: false, endedAt: at } : r))
-    const listed = list.map(info => {
-      const old = rows.find(r => r.id === info.id) ?? newRow(info.id, at)
-      const isDone = !isLive(info.status)
-      return {
-        ...old,
-        name: info.name ?? info.description ?? info.type,
-        type: info.type,
-        status: info.status,
-        isToolRunning: isDone ? false : old.isToolRunning,
-        endedAt: isDone ? (old.endedAt ?? at) : null,
-      }
-    })
-    // Keep each agent where it first appeared
-    const order = rows.map(r => r.id)
-    const merged = [...gone, ...listed].sort((a, b) => {
-      const i = order.indexOf(a.id)
-      const j = order.indexOf(b.id)
-      return (i < 0 ? Infinity : i) - (j < 0 ? Infinity : j) || a.startedAt - b.startedAt
-    })
-    return merged.slice(-MAX_ROWS)
-  })
-  const wasLive = liveCount
-  liveCount = list.filter(a => isLive(a.status)).length
-  if (liveCount !== wasLive) $.ui.invalidate('ui.render')
-  if (liveCount > 0) {
-    isExpecting = false
-    quietSince = null
-    if (isAuto && !isPaneOpen && !isDismissed) {
-      isPaneOpen = true
-      // Opened by a subagent starting, it shows them
-      await update($, agentsTab, () => 'subagents')
-      await $.ui.open({ id: AGENT_PANE, title: 'Agents', columns: AGENT_COLUMNS })
-      $.ui.invalidate('ui.render')
-    }
-  } else if (wasLive > 0 && quietSince === null) {
-    quietSince = at
-  }
-}
-
-// Once a second while anything is going on: sync, tick the clocks, fold when done
-async function tick($: EngineInterface) {
-  if (!isPaneOpen && !isExpecting && liveCount === 0 && quietSince === null) return
-  await sync($)
-  const at = await $.clock.now()
-  await update($, agentNow, () => at)
-  // The pane folds only from the Subagents tab with no Agent CLI chat working
-  const isHeld = (await read($, agentsTab)) === 'cli' || cliRuns.size > 0
-  if (quietSince !== null && liveCount === 0 && !isExpecting && !isHeld && at - quietSince >= LINGER_MS) {
-    quietSince = null
-    isDismissed = false
-    await update($, agents, () => [])
-    if (isPaneOpen) {
-      isPaneOpen = false
-      await $.ui.close({ id: AGENT_PANE })
-      $.ui.invalidate('ui.render')
-    }
-  }
-}
-
-async function stopAgent($: EngineInterface, row: AgentRow) {
-  try {
-    const ran = await $.tool.call({ tool: 'TaskStop', task_id: row.id })
-    if (ran.deny !== undefined) $.ui.toast(`Couldn't stop ${row.name}: ${ran.deny}`)
-    else if (ran.isError === true) $.ui.toast(`Couldn't stop ${row.name}: ${ran.text ?? 'error'}`)
-    else $.ui.toast(`Stopped ${row.name}`)
-  } catch (err: any) {
-    $.ui.toast(`Couldn't stop ${row.name}: ${err.message}`)
-  }
-  await sync($)
-}
-
-// A subagent's tool call becomes its current step. Called from the mod's one
-// unmatched tool.call hook, with `run` going on beneath.
-async function trackAgentTool<T>($: EngineInterface, id: string, e: { tool: string }, run: () => Promise<T>) {
-  const label = truncate(describeCall(e as { tool: string } & Record<string, unknown>), 80)
-  await setRow($, id, r => ({ ...r, tool: label, isToolRunning: true }))
-  const ran = await run()
-  await setRow($, id, r => (r.tool === label ? { ...r, isToolRunning: false } : r))
-  return ran
-}
-
-// Called from the mod's one ui.close hook. Closed by hand while agents run,
-// the pane stays closed until they finish.
-function noteAgentPaneClosed(e: { id: string; origin: { kind: string } }) {
-  if (e.id !== AGENT_PANE) return
-  isPaneOpen = false
-  if (e.origin.kind === 'person' && liveCount > 0) isDismissed = true
 }
 
 function formatTokens(n: number) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return String(n)
-}
-
-// Run from the mod's one session.start hook
-async function startAgentPane($: EngineInterface) {
-  isAuto = (await $.store.get(AGENT_STORE_KEY)) !== false
-  try {
-    await $.command.register({ name: 'agentpane', description: 'Open the agent pane', immediate: true })
-  } catch (err: any) {
-    $.ui.log('could not add /agentpane: ' + err.message)
-  }
-  $.clock.every(1000, () => {
-    tick($).catch((err: any) => $.ui.log('agent pane: ' + err.message))
-  })
 }
 
 // The files pane: the session's folder as a tree with git's marks, a filter by
@@ -1292,7 +1092,6 @@ async function startFiles($: EngineInterface) {
   try {
     const panes = await $.ui.panes()
     isFilesOpen = panes.some(p => p.id === FILES_PANE)
-    isPaneOpen = panes.some(p => p.id === AGENT_PANE)
     isTrayOpen = panes.some(p => p.id === PANE)
   } catch {}
 }
@@ -1379,19 +1178,10 @@ function modelOptions(models: { value: string; label: string }[], filter: string
   }
 }
 
-// Shows a tab of the Agents pane; the Agent CLI tab looks for CLIs and their models first
-async function setAgentsTab($: EngineInterface, tab: 'subagents' | 'cli') {
-  if (tab === 'cli') {
-    await detectClis($)
-    await loadModels($, (await read($, cliPane)).cli)
-  }
-  await update($, agentsTab, () => tab)
-  $.ui.invalidate('ui.render')
-}
-
-// /agentcli: the Agents pane on its Agent CLI tab, the keyboard in its message field
+// /agentcli: the pane, the keyboard in its message field; it looks for CLIs and their models first
 async function openCliPane($: EngineInterface) {
-  await setAgentsTab($, 'cli')
+  await detectClis($)
+  await loadModels($, (await read($, cliPane)).cli)
   await openAgentPane($, true)
 }
 
@@ -1607,80 +1397,7 @@ async function startCliPane($: EngineInterface) {
   detectClis($).catch(() => {})
 }
 
-// The Subagents tab
-async function drawSubagents($: EngineInterface, e: RenderInput<'Pane'>) {
-  const { Box, Text, Button } = $.ui.resolve(e)
-  const rows = await read($, agents)
-  const tick = await read($, agentNow)
-  const cols = Math.max(24, (e.props.bodyColumns || 46) - 2)
-  const viewing = e.props.view.agentId
-  const running = rows.filter(r => isLive(r.status)).length
-
-  const agentRow = (row: AgentRow) => {
-    const isRunning = isLive(row.status)
-    const isFailed = row.status === 'failed' || row.status === 'killed'
-    const mark = isRunning ? (
-      <Text color={AGENT_COLORS.dot}>● </Text>
-    ) : isFailed ? (
-      <Text color={AGENT_COLORS.failed}>✗ </Text>
-    ) : (
-      <Text color={AGENT_COLORS.check}>✓ </Text>
-    )
-    const elapsed = formatElapsed((row.endedAt ?? Math.max(tick, row.startedAt)) - row.startedAt)
-    const facts = [row.tokens > 0 ? `${formatTokens(row.tokens)} tok` : '', elapsed].filter(Boolean).join(' · ')
-    const doing = isRunning
-      ? (row.tool ?? (row.status === 'pending' ? 'Starting…' : 'Thinking…'))
-      : row.status === 'killed'
-        ? 'Stopped'
-        : row.status === 'failed'
-          ? 'Failed'
-          : 'Done'
-    const isViewed = viewing === row.id
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" columnGap={1}>
-          <Box flexGrow={1} flexShrink={1}>
-            <Text wrap="truncate-end">
-              {mark}
-              <Text bold dimColor={!isRunning}>{row.name}</Text>
-              {row.type !== '' ? <Text dimColor> {row.type}</Text> : null}
-              {isViewed ? <Text color={AGENT_COLORS.dot}> ◀ viewing</Text> : null}
-            </Text>
-          </Box>
-          {isRunning ? (
-            <Box backgroundColor={AGENT_COLORS.stop}>
-              <Button key={'stop-' + row.id} label=" ■ Stop " plain onPress={() => void stopAgent($, row)} />
-            </Box>
-          ) : null}
-        </Box>
-        <Box flexDirection="row" columnGap={1}>
-          <Box flexGrow={1} flexShrink={1}>
-            <Text wrap="truncate-end" color={isRunning && row.isToolRunning ? AGENT_COLORS.working : undefined} dimColor={!(isRunning && row.isToolRunning)}>
-              {'  ↳ ' + doing}
-            </Text>
-          </Box>
-          <Text dimColor>{facts}</Text>
-        </Box>
-      </Box>
-    )
-  }
-
-  return (
-    <Box flexDirection="column" paddingX={1}>
-      <Box flexDirection="row" justifyContent="space-between">
-        <Text color={AGENT_COLORS.title} bold>◆  A G E N T S</Text>
-        <Text dimColor>{running > 0 ? `${running} running` : rows.length > 0 ? 'all done' : ''}</Text>
-      </Box>
-      <Text dimColor>{'─'.repeat(cols)}</Text>
-      {rows.length === 0 ? <Text dimColor>No subagents yet. They show here as they start.</Text> : null}
-      {rows.map(agentRow)}
-      <Text> </Text>
-      <Text dimColor wrap="truncate-end">Open a conversation: /tasks, then Enter</Text>
-    </Box>
-  )
-}
-
-// The Agent CLI tab
+// The Agent CLI pane
 async function drawCli($: EngineInterface, e: RenderInput<'Pane'>) {
   const elements = $.ui.resolve(e)
   const { Box, Text, Button, Markdown } = elements
@@ -1691,8 +1408,7 @@ async function drawCli($: EngineInterface, e: RenderInput<'Pane'>) {
   const found = await read($, clis)
   const models = await read($, cliModels)
   const cols = Math.max(30, (e.props.bodyColumns || AGENT_COLUMNS) - 2)
-  // Less the tab row above
-  const bodyRows = (e.props.scroll.bodyRows || 30) - 1
+  const bodyRows = e.props.scroll.bodyRows || 30
   const chat = view.isNew ? undefined : (view.chats.find(c => c.id === view.selected) ?? view.chats[view.chats.length - 1])
   const specOf = (id: string) => CLI_SPECS.find(s => s.id === id)
 
@@ -2329,7 +2045,6 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await startProgress($)
     await startTray($)
-    await startAgentPane($)
     await startFiles($)
     await startCliPane($)
     await startSessions($)
@@ -2383,10 +2098,9 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Until the model sends a plan, each tool call it makes shows as a step
-  // A subagent's calls feed the agent pane instead
+  // Until the model sends a plan, each tool call it makes shows as a step; a subagent's calls don't
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return trackAgentTool($, e.agentId, e, () => next(e))
+    if (e.agentId !== undefined) return next(e)
     if (isActive && !QUIET_TOOLS.has(e.tool)) {
       await addAutoStep($, truncate(describeCall(e as { tool: string } & Record<string, unknown>), 70))
     }
@@ -2480,12 +2194,10 @@ export const register: Register = on => {
   })
 
   on('ui.close', async ($, e, next) => {
-    noteAgentPaneClosed(e)
     noteSessionsClosed(e.id)
     noteTeamClosed(e.id)
     if (e.id === TEAM_PANE) $.ui.invalidate('ui.render')
     if (e.id === SESSIONS_PANE) $.ui.invalidate('ui.render')
-    if (e.id === AGENT_PANE) $.ui.invalidate('ui.render')
     if (e.id === FILES_PANE) {
       isFilesOpen = false
       $.ui.invalidate('ui.render')
@@ -2499,14 +2211,10 @@ export const register: Register = on => {
 
   // Small buttons in the band above the prompt, like status bar buttons: the
   // Sessions pane, the files pane, the Team pane (with how many threads are
-  // working), the Agents pane (with how many subagents and Agent CLI chats are
   // working) and the Tools tray
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const { Box, Button } = $.ui.resolve(e)
     const theirs = await next(e)
-    // Subagents running and Agent CLI chats working
-    const working = liveCount + cliRuns.size
-    const agentsLabel = ' ● Agents' + (working > 0 ? ' ' + working : '') + (isPaneOpen ? ' ▴ ' : ' ▾ ')
     const button = Box({
       key: 'tray-button-row',
       flexDirection: 'row',
@@ -2543,17 +2251,6 @@ export const register: Register = on => {
               label: teamButtonLabel(),
               plain: true,
               onPress: () => toggleTeamPane($),
-            }),
-          ],
-        }),
-        Box({
-          backgroundColor: TRAY_PURPLE,
-          children: [
-            Button({
-              key: 'open-agents',
-              label: agentsLabel,
-              plain: true,
-              onPress: () => toggleAgentPane($),
             }),
           ],
         }),
@@ -2691,60 +2388,12 @@ export const register: Register = on => {
         settingRow('statusline', st.statusLine === true, 'Status line', 'model · effort · context · 5h use', st.statusLine ? ' ● On ' : ' ○ Off ', st.statusLine ? TRAY_GREEN : undefined, () =>
           setStatusLine($, st.statusLine !== true),
         ),
-        Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          children: [
-            isAgentPaneAuto() ? Text({ color: TRAY_GREEN, children: ['●'] }) : Text({ dimColor: true, children: ['○'] }),
-            Text({ bold: true, children: ['Agent pane'] }),
-            Box({
-              flexGrow: 1,
-              flexShrink: 1,
-              children: [Text({ dimColor: true, wrap: 'truncate-end', children: ['live subagents, opens as they start'] })],
-            }),
-            Button({ key: 'agentpane-open', label: ' Open ', plain: true, onPress: () => void openAgentPane($) }),
-            isAgentPaneAuto()
-              ? Box({
-                  backgroundColor: TRAY_GREEN,
-                  children: [Button({ key: 'agentpane', label: ' ● Auto ', plain: true, onPress: () => void setAgentPaneAuto($, false) })],
-                })
-              : Button({ key: 'agentpane', label: ' ○ Auto ', plain: true, onPress: () => void setAgentPaneAuto($, true) }),
-          ],
-        }),
         Text({ children: [' '] }),
         Text({ dimColor: true, children: ['Tab/↑↓ move · Enter select · Esc close · styles & helpers apply to new sessions'] }),
         ...commandRows(),
       ],
     })
   })
-
-  // The agent pane
-
-  on('command.run', { command: 'agentpane' }, async $ => {
-    await openAgentPane($)
-    return {}
-  })
-
-  on('agent.spawn', async ($, e, next) => {
-    isExpecting = true
-    const ran = await next(e)
-    if (ran.deny !== undefined) isExpecting = false
-    await sync($)
-    return ran
-  })
-
-  // Each model request of a subagent reports its tokens: the context it sent plus its answer
-  on('turn.step', async function* ($, e, next) {
-    const ran = yield* next(e)
-    const id = e.agentId
-    const usage = ran.usage
-    if (id !== undefined && usage) {
-      const tokens = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens + usage.output_tokens
-      await setRow($, id, r => ({ ...r, tokens }))
-    }
-    return ran
-  })
-
 
   // The files pane
 
@@ -2978,36 +2627,12 @@ export const register: Register = on => {
     )
   })
 
-  // The Agents pane's Agent CLI tab
+  // The Agent CLI pane
 
   on('command.run', { command: 'agentcli' }, async $ => {
     await openCliPane($)
     return {}
   })
 
-
-  // The Agents pane: its tab row, then the tab showing
-  on('ui.render', { component: 'Pane', requestId: AGENT_PANE }, async ($, e) => {
-    const { Box, Button } = $.ui.resolve(e)
-    const tab = await read($, agentsTab)
-    const running = (await read($, agents)).filter(r => isLive(r.status)).length
-    const working = (await read($, cliPane)).chats.filter(c => c.isRunning).length
-    const tabButton = (id: 'subagents' | 'cli', label: string) =>
-      tab === id ? (
-        <Box backgroundColor={CLI_COLORS.tab}>
-          <Button key={'agents-tab-' + id} label={` ${label} `} plain onPress={() => void setAgentsTab($, id)} />
-        </Box>
-      ) : (
-        <Button key={'agents-tab-' + id} label={` ${label} `} plain dimColor onPress={() => void setAgentsTab($, id)} />
-      )
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" columnGap={1} paddingX={1}>
-          {tabButton('subagents', '● Subagents' + (running > 0 ? ` ${running}` : ''))}
-          {tabButton('cli', '⌘ Agent CLI' + (working > 0 ? ` ${working}` : ''))}
-        </Box>
-        {tab === 'cli' ? await drawCli($, e) : await drawSubagents($, e)}
-      </Box>
-    )
-  })
+  on('ui.render', { component: 'Pane', requestId: AGENT_PANE }, async ($, e) => drawCli($, e))
 }
