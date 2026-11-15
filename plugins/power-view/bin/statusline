@@ -13,12 +13,13 @@ import sys
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 ORCA_STATUSLINE = os.path.expanduser("~/.orca/agent-hooks/claude-statusline.sh")
 
-# (label, value for "model", key under "modelSettings"), as the Tools tray offers them
+# (label, value for "model", key under "modelSettings"), as the Tools tray offers them.
+# Keep this list in step with TRAY_MODELS in hooks/register.tsx.
 MODELS = [
     ("Haiku 4.5", "haiku", "claude-haiku-4-5"),
     ("Sonnet 5.5", "sonnet", "claude-sonnet-5-5"),
     ("Opus 5.5", "opus[1m]", "claude-opus-5-5"),
-    ("Fable 5.1", "fable", "claude-fable-5-1"),
+    ("Fable 5.2", "fable", "claude-fable-5-2"),
 ]
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
