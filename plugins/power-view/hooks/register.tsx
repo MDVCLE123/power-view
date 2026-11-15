@@ -360,12 +360,13 @@ const TRAY_ORANGE = '#d77757'
 const TRAY_PURPLE = '#b48ead'
 const TRAY_GREEN = '#5faf5f'
 
-// The choices: `value` is what settings.json takes, a model's `key` where its effort lives under modelSettings
+// The choices: `value` is what settings.json takes, a model's `key` where its effort lives under modelSettings.
+// Keep this list in step with MODELS in bin/statusline, which reads the same settings.
 const TRAY_MODELS = [
   { label: 'Haiku 4.5', value: 'haiku', key: 'claude-haiku-4-5' },
   { label: 'Sonnet 5.5', value: 'sonnet', key: 'claude-sonnet-5-5' },
   { label: 'Opus 5.5', value: 'opus[1m]', key: 'claude-opus-5-5' },
-  { label: 'Fable 5.1', value: 'fable', key: 'claude-fable-5-1' },
+  { label: 'Fable 5.2', value: 'fable', key: 'claude-fable-5-2' },
 ]
 const TRAY_EFFORTS = [
   { label: 'Low', value: 'low' },
@@ -939,14 +940,56 @@ async function moveClaude($: EngineInterface, target: string) {
   return isMoved
 }
 
-// macOS's own folder picker
+// The host's own folder picker: macOS's, else zenity or kdialog on a Linux
+// desktop; with none, the path box above it is the way in
 async function chooseFolder($: EngineInterface) {
+  const title = 'Open a project in the Files pane'
   try {
-    const r = await $.process.run(['osascript', '-e', 'POSIX path of (choose folder with prompt "Open a project in the Files pane")'], { timeoutMs: 600_000 })
+    const os = await hostOs($)
+    let argv: string[] | null = null
+    if (os === 'Darwin') argv = ['osascript', '-e', `POSIX path of (choose folder with prompt "${title}")`]
+    else if (os === 'Linux' && (await hasDisplay($))) {
+      if (await onPath($, 'zenity')) argv = ['zenity', '--file-selection', '--directory', `--title=${title}`]
+      else if (await onPath($, 'kdialog')) argv = ['kdialog', '--getexistingdirectory', (await home($)) || '.', '--title', title]
+    }
+    if (argv === null) {
+      $.ui.toast('No folder picker here: type the folder path in the box above')
+      return
+    }
+    const r = await $.process.run(argv, { timeoutMs: 600_000 })
     if (r.exitCode === 0 && r.stdout.trim() !== '') await openProject($, r.stdout.trim())
   } catch (err: any) {
     $.ui.toast("Couldn't show the folder picker: " + err.message)
   }
+}
+
+// The host's OS as uname names it ('Darwin', 'Linux'); null where there is no uname, as on Windows
+async function hostOs($: EngineInterface) {
+  try {
+    const r = await $.process.run(['uname', '-s'], { timeoutMs: 5000 })
+    return r.exitCode === 0 ? r.stdout.trim() : null
+  } catch {
+    return null
+  }
+}
+
+async function onPath($: EngineInterface, bin: string) {
+  try {
+    return (await $.process.run(['which', bin], { timeoutMs: 5000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+// Whether a Linux host has a desktop to open windows on
+async function hasDisplay($: EngineInterface) {
+  for (const name of ['WAYLAND_DISPLAY', 'DISPLAY']) {
+    try {
+      const r = await $.process.run(['printenv', name], { timeoutMs: 5000 })
+      if (r.exitCode === 0 && r.stdout.trim() !== '') return true
+    } catch {}
+  }
+  return false
 }
 
 // Tries the move again for a project Claude couldn't move to
@@ -1358,12 +1401,18 @@ async function handOff($: EngineInterface, chat: CliChat, isDraft: boolean) {
   }
 }
 
-// Opens a terminal window that picks the chat up in the CLI's own screen: iTerm when installed, else Terminal
+// Opens a terminal window that picks the chat up in the CLI's own screen: on
+// macOS iTerm when installed, else Terminal; elsewhere as openTerminal does
 async function continueInTerminal($: EngineInterface, chat: CliChat) {
   const cli = (await read($, clis)).find(c => c.id === chat.cli)
   const spec = CLI_SPECS.find(s => s.id === chat.cli)
   if (cli === undefined || spec === undefined) return
   const line = shellLine(await $.session.cwd(), spec.interactive({ path: cli.path, sessionId: chat.sessionId }))
+  if ((await hostOs($)) !== 'Darwin') {
+    const note = await openTerminal($, line).catch((err: any) => `Couldn't open a terminal: ${err.message}`)
+    if (note !== null) $.ui.toast(note)
+    return
+  }
   const hasITerm = await $.fs.exists('/Applications/iTerm.app').catch(() => false)
   const script = hasITerm
     ? ['tell application "iTerm"', 'activate', 'set w to (create window with default profile)', `tell current session of w to write text ${appleScriptString(line)}`, 'end tell']
@@ -1723,8 +1772,36 @@ async function selectSession($: EngineInterface, s: SessionRow) {
   await $.ui.scroll({ to: { key: 'session-actions' }, in: SESSIONS_PANE }).catch(() => {})
 }
 
-// Opens a new tab in iTerm (a window in Terminal) running a shell line
-async function inNewTab($: EngineInterface, line: string) {
+// Linux terminals to try, first found wins, each with the arguments that run a shell line in it
+const LINUX_TERMINALS: { bin: string; args: (line: string) => string[] }[] = [
+  { bin: 'x-terminal-emulator', args: line => ['-e', 'sh', '-c', line] },
+  { bin: 'gnome-terminal', args: line => ['--', 'sh', '-c', line] },
+  { bin: 'konsole', args: line => ['-e', 'sh', '-c', line] },
+  { bin: 'xterm', args: line => ['-e', 'sh', '-c', line] },
+]
+
+// Runs a shell line in a new terminal window off macOS: the first Linux
+// terminal found, left running on its own. Where none can be opened, as on
+// Windows, the line goes on the clipboard. Null once a terminal opened, else
+// the note that says what to do instead
+async function openTerminal($: EngineInterface, line: string): Promise<string | null> {
+  if ((await hostOs($)) === 'Linux' && (await hasDisplay($))) {
+    for (const t of LINUX_TERMINALS) {
+      if (!(await onPath($, t.bin))) continue
+      // nohup and & so the window outlives this call and the plugin's reloads
+      const ran = await $.process.run(['sh', '-c', 'nohup "$0" "$@" >/dev/null 2>&1 </dev/null &', t.bin, ...t.args(line)])
+      if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || `${t.bin} failed`)
+      return null
+    }
+  }
+  const copied = await $.ui.copy({ text: line }).catch(() => ({ isCopied: false }))
+  return copied.isCopied ? 'No terminal to open here, so the command is on your clipboard: paste it in a terminal' : `No terminal to open here. Run this in one: ${line}`
+}
+
+// Opens a new tab in iTerm (a window in Terminal) running a shell line; off
+// macOS, as openTerminal does. Null once it opened, else what to do instead
+async function inNewTab($: EngineInterface, line: string): Promise<string | null> {
+  if ((await hostOs($)) !== 'Darwin') return openTerminal($, line)
   const hasITerm = await $.fs.exists('/Applications/iTerm.app').catch(() => false)
   const script = hasITerm
     ? [
@@ -1741,6 +1818,7 @@ async function inNewTab($: EngineInterface, line: string) {
     : ['tell application "Terminal"', 'activate', `do script ${appleScriptString(line)}`, 'end tell']
   const ran = await $.process.run(['osascript', ...script.flatMap(l => ['-e', l])])
   if (ran.exitCode !== 0) throw new Error(ran.stderr.trim() || 'osascript failed')
+  return null
 }
 
 // The shell line that picks a session up in a terminal of its own
@@ -1758,8 +1836,8 @@ async function openSession($: EngineInterface) {
   if (s.sessionId === selfSessionId) return saySessions($, 'That is this session.')
   if (s.kind === 'interactive') return saySessions($, `"${s.name}" is open in another terminal: switch to that window.`)
   if (canResumeHere(s)) return resumeHere($, s)
-  await inNewTab($, resumeLine(s))
-  return saySessions($, `"${s.name}" is still running, so it opened in a new terminal tab.`)
+  const note = await inNewTab($, resumeLine(s))
+  return saySessions($, note ?? `"${s.name}" is still running, so it opened in a new terminal tab.`)
 }
 
 // /resume in this terminal; a conversation from another folder moves Claude
@@ -1771,8 +1849,8 @@ async function resumeHere($: EngineInterface, s: SessionRow) {
       await $.command.run({ command: 'cd', args: s.cwd })
     } catch {}
     if ((await $.session.cwd()) !== s.cwd) {
-      await inNewTab($, resumeLine(s))
-      return saySessions($, `Couldn't move here to ${shortDir(s.cwd, sessionsHome)}, so "${s.name}" opened in a new terminal tab.`)
+      const note = await inNewTab($, resumeLine(s))
+      return saySessions($, note ?? `Couldn't move here to ${shortDir(s.cwd, sessionsHome)}, so "${s.name}" opened in a new terminal tab.`)
     }
   }
   await saySessions($, `Resuming "${s.name}" here…`)
@@ -1783,8 +1861,8 @@ async function openInTab($: EngineInterface) {
   const s = await selectedSession($)
   if (!s) return saySessions($, 'Pick a session first.')
   if (s.kind === 'interactive') return saySessions($, `"${s.name}" is open in another terminal: switch to that window.`)
-  await inNewTab($, resumeLine(s))
-  return saySessions($, `Opened "${s.name}" in a new terminal tab.`)
+  const note = await inNewTab($, resumeLine(s))
+  return saySessions($, note ?? `Opened "${s.name}" in a new terminal tab.`)
 }
 
 // Brings an earlier or finished conversation back as a background session, listed in agent view

@@ -75,8 +75,9 @@ test('rows are named by their title and described by their last prompt, or reply
   expect(rowDir('/Users/me/Documents/Elation_API', HOME)).toBe('~/Documents/Elation_API')
 })
 
-async function setup($: any, on: any) {
+async function setup($: any, on: any, host: { os: string | null; bins: string[] } = { os: 'Darwin', bins: [] }) {
   const runs: { argv: string[]; cwd?: string }[] = []
+  const copied: string[] = []
   const opened: string[] = []
   const closed: string[] = []
   const commands: { command: string; args: string }[] = []
@@ -85,6 +86,10 @@ async function setup($: any, on: any) {
   on('settings.read', () => ({ value: { outputStyle: 'default' } }))
   on('command.register', ($: any, e: any) => ({ value: { command: e.name } }))
   on('ui.toast', () => ({ value: undefined }))
+  on('ui.copy', ($: any, e: any) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
   on('ui.log', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
@@ -123,6 +128,11 @@ async function setup($: any, on: any) {
     const argv: string[] = [...e.argv]
     runs.push({ argv, cwd: e.init?.cwd })
     const [cmd, first] = argv
+    if (cmd === 'uname') {
+      return host.os === null ? { value: { exitCode: 127, stdout: '', stderr: 'not found', isStdoutTruncated: false, isStderrTruncated: false } } : { value: { exitCode: 0, stdout: host.os + '\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (cmd === 'which') return { value: { exitCode: host.bins.includes(first!) ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (cmd === 'printenv') return { value: { exitCode: first === 'DISPLAY' ? 0 : 1, stdout: first === 'DISPLAY' ? ':0\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     const stdout =
       cmd === 'tail' ? TRANSCRIPT
       : cmd === 'python3' ? RECENT
@@ -132,7 +142,7 @@ async function setup($: any, on: any) {
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   await $.session.start({ cwd: '/Users/me/proj' } as any)
-  return { runs, opened, closed, commands, setCwd: (to: string) => (cwd = to) }
+  return { runs, opened, closed, commands, copied, setCwd: (to: string) => (cwd = to) }
 }
 
 test('the Sessions button toggles the pane, which lists, starts and resumes sessions', async ($, on) => {
@@ -193,4 +203,28 @@ test('the Sessions button toggles the pane, which lists, starts and resumes sess
     await again.unmount()
     expect(closed.at(-1)).toBe(PANE)
   }
+})
+
+test('off macOS a running session opens in a Linux terminal, or its command goes on the clipboard', async ($, on) => {
+  const host = { os: 'Linux' as string | null, bins: ['gnome-terminal'] }
+  const { runs, copied } = await setup($, on, host)
+  const band = await $.ui.mount({ plugin: 'power-view', surface: 'terminal', ...BAND })
+  await band.press({ key: 'open-sessions' })
+  await band.unmount()
+  const pane = await $.ui.mount({ plugin: 'power-view', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+
+  // Linux: the first terminal found, started on its own so it outlives the call
+  await pane.press({ key: 's-cccc3333-0000' })
+  await pane.press({ key: 'open' })
+  const started = runs.filter(r => r.argv[0] === 'sh').at(-1)!.argv
+  expect(started.slice(3, 7)).toEqual(['gnome-terminal', '--', 'sh', '-c'])
+  expect(started.at(-1)).toBe("cd '/Users/me/my_repo' && 'claude' 'attach' 'cccc3333'")
+  expect(runs.some(r => r.argv[0] === 'osascript')).toBe(false)
+  expect(textOf(await pane.drawn())).toContain('opened in a new terminal tab')
+
+  // No uname (Windows): the command goes on the clipboard and the pane says so
+  host.os = null
+  await pane.press({ key: 'open' })
+  expect(copied.at(-1)).toBe("cd '/Users/me/my_repo' && 'claude' 'attach' 'cccc3333'")
+  expect(textOf(await pane.drawn())).toContain('on your clipboard')
 })

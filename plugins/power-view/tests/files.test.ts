@@ -38,13 +38,19 @@ async function setup($: any, on: any) {
   const mtimes: Record<string, number> = {}
   // Where the session is, and whether /cd moves it
   const where = { cwd: ROOT, canMove: true }
+  // The host: its uname, the programs on its PATH, what a folder picker answers
+  const host = { os: 'Darwin', bins: [] as string[], picked: '/work/api\n' }
+  const toasts: string[] = []
   const cds: string[] = []
   const closed: string[] = []
   mock.clock(on, { now: 1_000_000 })
   mock.store(on, {})
   on('settings.read', () => ({ value: { outputStyle: 'default' } }))
   on('command.register', ($: any, e: any) => ({ value: { command: e.name } }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', ($: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('ui.log', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
@@ -92,10 +98,13 @@ async function setup($: any, on: any) {
     if (argv[0] === 'git' && argv[1] === 'grep') return ok('src/app.py\n')
     if (argv[0] === 'open') return ok('')
     if (argv[0] === 'printenv') return ok('/Users/me\n')
+    if (argv[0] === 'uname') return ok(host.os + '\n')
+    if (argv[0] === 'which' && host.bins.includes(argv[1]!)) return ok(`/usr/bin/${argv[1]}\n`)
+    if (['osascript', 'zenity', 'kdialog'].includes(argv[0]!)) return ok(host.picked)
     return { value: { exitCode: 1, stdout: '', stderr: 'no', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   await $.session.start({ cwd: ROOT } as any)
-  return { runs, opened, closed, widths, writes, disk, mtimes, where, cds }
+  return { runs, opened, closed, widths, writes, disk, mtimes, where, cds, host, toasts }
 }
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: {}, view: {} } as any }
@@ -345,4 +354,43 @@ test('where Claude cannot move, the pane shows the project on its own and offers
   await pane.press({ key: 'project:/repo' })
   expect(where.cwd).toBe('/repo')
   expect(textOf(await pane.drawn())).toContain('README.md')
+})
+
+test('Choose folder… uses the host picker: the macOS one, zenity or kdialog on Linux, else says to type the path', async ($, on) => {
+  const { runs, cds, host, toasts } = await setup($, on)
+  // The picker run by the last press
+  const picker = () => runs.filter(r => ['osascript', 'zenity', 'kdialog'].includes(r[0]!)).at(-1)
+  await $.command.run({ command: 'filespane', args: '' })
+  const pane = await $.ui.mount({ plugin: 'power-view', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+
+  // macOS: its own picker, as before
+  await pane.press({ key: 'files-open' })
+  await pane.press({ key: 'files-choose' })
+  expect(picker()?.[0]).toBe('osascript')
+  expect(cds.at(-1)).toBe('/work/api')
+
+  // Linux with zenity on the PATH
+  host.os = 'Linux'
+  host.bins = ['zenity', 'kdialog']
+  host.picked = '/Users/me/notes\n'
+  await pane.press({ key: 'files-open' })
+  await pane.press({ key: 'files-choose' })
+  expect(picker()?.slice(0, 3)).toEqual(['zenity', '--file-selection', '--directory'])
+  expect(cds.at(-1)).toBe('/Users/me/notes')
+
+  // Linux with only kdialog
+  host.bins = ['kdialog']
+  host.picked = '/repo\n'
+  await pane.press({ key: 'files-open' })
+  await pane.press({ key: 'files-choose' })
+  expect(picker()?.slice(0, 3)).toEqual(['kdialog', '--getexistingdirectory', '/Users/me'])
+  expect(cds.at(-1)).toBe('/repo')
+
+  // No picker at all: nothing runs, and the toast points at the path box
+  host.bins = []
+  const before = runs.length
+  await pane.press({ key: 'files-open' })
+  await pane.press({ key: 'files-choose' })
+  expect(runs.slice(before).some(r => ['osascript', 'zenity', 'kdialog'].includes(r[0]!))).toBe(false)
+  expect(toasts.at(-1)).toContain('type the folder path')
 })

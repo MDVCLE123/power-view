@@ -79,6 +79,7 @@ async function setup($: any, on: any, options: { isSlow?: boolean; hasModels?: b
     if (argv[0] === CURSOR && argv[1] === '--list-models' && options.hasModels) {
       return { value: { exitCode: 0, stdout: options.modelList ?? MODEL_LIST, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
+    if (argv[0] === 'uname') return { value: { exitCode: 0, stdout: 'Darwin\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: found || argv[0] === 'osascript' ? 0 : 1, stdout: found ? CURSOR + '\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('process.spawn', async function* ($: any, e: any) {
